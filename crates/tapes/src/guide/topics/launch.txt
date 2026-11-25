@@ -19,7 +19,7 @@ DECLARE WHO LAUNCHED WHOM
   wrote the records, by convention `<tool>/<version>`; a person writing lines
   by hand names themself or their tool. `written_at` is optional, RFC 3339.
   A session reference is {"harness":H,"id":I}: H is a harness name as `tapes
-  list` prints it (claude, codex, pi, opencode) and I that harness's own
+  list` prints it (antigravity, claude, codex, pi, opencode) and I that harness's own
   session id. Every later line is a record whose `kind` says what it states.
   `tier` is required on every record: `bound` when it is the producer's own
   record (it launched the child, or ran or recorded the work, and recorded

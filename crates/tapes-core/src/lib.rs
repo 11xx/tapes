@@ -985,6 +985,7 @@ pub fn capture_with_backends(
         anyhow::bail!("capture state is available only for native recordings");
     }
     let store_path_class = match session.harness() {
+        "antigravity" => "antigravity-acp-transcript",
         "claude" => "claude-project-jsonl",
         "codex" => "codex-session-jsonl",
         "pi" => "pi-session-jsonl",

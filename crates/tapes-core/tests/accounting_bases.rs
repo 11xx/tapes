@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
-    claude::ClaudeBackend, codex::CodexBackend, opencode::OpenCodeBackend, pi::PiBackend, Backend,
-    Query,
+    antigravity::AntigravityBackend, claude::ClaudeBackend, codex::CodexBackend,
+    opencode::OpenCodeBackend, pi::PiBackend, Backend, Query,
 };
 use agent_tapes_core::model::{AccountingBasis, Session};
 use agent_tapes_core::{usage_full_with_backends, usage_with_backends, Selection};
@@ -132,6 +132,10 @@ fn produced(backend: Box<dyn Backend>) -> BTreeSet<String> {
 fn the_declarations_name_each_harness_bases() {
     let declared = |backend: &dyn Backend| backend.accounting_bases().to_vec();
     let root = Path::new("/nonexistent");
+    assert_eq!(
+        declared(&AntigravityBackend::new(root)),
+        [AccountingBasis::SummedRequests]
+    );
     assert_eq!(
         declared(&ClaudeBackend::new(root)),
         [

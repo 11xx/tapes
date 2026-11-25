@@ -50,14 +50,20 @@ ANTIGRAVITY ACP
   needs the native JSONL, and fails explicitly if it is unavailable. Multiple
   profile databases for the same id refuse selection.
 
-  The reader keeps visible messages, reasoning, tool calls and generic tool
-  results. The native JSONL supplies no call id for generic results. Recorded
-  step status is kept per turn. Failed or interrupted provider turns from T3
-  statev2.sqlite appear separately in the read notes, joined by exact provider
-  identity. A provider switch keeps each native session independent. A T3 link
-  follows the active-provider rule above. Recover an earlier provider session
-  by its native id. Use --global for listings because the JSONL does not
-  establish the session's working directory.
+  The reader keeps visible messages, reasoning, tool calls, generic tool
+  results, model selections and native token usage. The native JSONL supplies
+  no call id for generic results. Recorded step status is kept per turn.
+  `PLANNER_RESPONSE` and token-bearing `CHECKPOINT` compaction records sum as
+  `summed-requests` under the excludes-cache, includes-reasoning convention;
+  `CHECKPOINT` calls without a model name enter unattributed usage rather than
+  being dropped or misattributed, and native monetary cost stays absent.
+  `trajectory_metadata_blob` supplies the session's working directory when
+  present so `--here` and `--project` scopes select Antigravity sessions
+  directly. Failed or interrupted provider turns from T3 statev2.sqlite appear
+  separately in the read notes, joined by exact provider identity. A provider
+  switch keeps each native session independent. A T3 link follows the
+  active-provider rule above. Recover an earlier provider session by its native
+  id.
 
   A projected Antigravity child thread can have a task reference in place of
   a native session reference. Its exact launch run must belong to the

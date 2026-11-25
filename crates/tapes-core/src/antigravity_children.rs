@@ -195,7 +195,7 @@ fn spawn_matches(database: &Path, step: u64, task: &str) -> Result<bool> {
 }
 
 /// Read one singular protobuf bytes field, rejecting malformed or repeated fields.
-fn length_field(mut input: &[u8], wanted: u64) -> Option<&[u8]> {
+pub(crate) fn length_field(mut input: &[u8], wanted: u64) -> Option<&[u8]> {
     let mut result = None;
     while !input.is_empty() {
         let tag = varint(&mut input)?;

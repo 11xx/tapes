@@ -196,7 +196,6 @@ pub(crate) fn candidates(home: &Path, limit: usize, prefix: Option<&str>) -> Can
     let mut page = CandidatePage::empty();
     let mut matches = BTreeMap::<String, Option<PathBuf>>::new();
     let limit = limit.min(MAX_CANDIDATES);
-    let mut capped = false;
     let walked = conversation_dirs(home, &mut page.visited_entries, |dir, entries, visited| {
         each_entry(dir, entries, visited, |path, _| {
             let Some(id) = path
@@ -209,8 +208,6 @@ pub(crate) fn candidates(home: &Path, limit: usize, prefix: Option<&str>) -> Can
             };
             if let Some(existing) = matches.get_mut(id) {
                 *existing = None;
-            } else if matches.len() == limit {
-                capped = true;
             } else {
                 matches.insert(id.to_owned(), Some(path.to_owned()));
             }
@@ -223,11 +220,24 @@ pub(crate) fn candidates(home: &Path, limit: usize, prefix: Option<&str>) -> Can
         // An unvisited profile can hold a second copy of any candidate.
         return page;
     }
-    if capped {
+    let mut ordered: Vec<(String, Option<PathBuf>, std::time::SystemTime)> = matches
+        .into_iter()
+        .map(|(id, path)| {
+            let modified = path
+                .as_deref()
+                .and_then(|path| fs::symlink_metadata(path).ok())
+                .and_then(|meta| meta.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (id, path, modified)
+        })
+        .collect();
+    ordered.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    if ordered.len() > limit {
         page.complete = false;
+        ordered.truncate(limit);
     }
     let started = Instant::now();
-    for (id, path) in matches {
+    for (id, path, _) in ordered {
         if started.elapsed() >= Duration::from_secs(10) {
             page.complete = false;
             page.failures.push(DiscoveryError::BoundExhausted {

@@ -134,7 +134,10 @@ pub const GROUPS: &[Group] = &[
         topics: &[
             topic!("input", "ChatGPT and Perplexity exports"),
             topic!("remote", "Another machine's sessions over ssh"),
-            topic!("native-store", "A copied Claude, Codex or Pi store"),
+            topic!(
+                "native-store",
+                "A copied Antigravity, Claude, Codex or Pi store"
+            ),
             topic!(
                 "launch",
                 "How a launcher declares which session started which"

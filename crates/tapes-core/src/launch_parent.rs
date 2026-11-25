@@ -8,9 +8,9 @@
 //! tapes-parent: <harness>:<session-id>
 //! ```
 //!
-//! and nothing before it. `<harness>` is `claude`, `codex`, `pi` or
-//! `opencode`; `<session-id>` is the launching session's native id, 1 to 128
-//! ASCII letters, digits, `-`, `_` or `.`. The line ends at a line feed or at
+//! and nothing before it. `<harness>` is `antigravity`, `claude`, `codex`,
+//! `pi` or `opencode`; `<session-id>` is the launching session's native id,
+//! 1 to 128 ASCII letters, digits, `-`, `_` or `.`. The line ends at a line feed or at
 //! the end of the prompt. A first prompt that opens with `tapes-parent:` in
 //! any other form is a malformed marker: it names no parent and the session
 //! says so. The first prompt is the first user message whose text is not
@@ -22,7 +22,7 @@ use crate::model::{is_known_envelope, is_known_notice, Session};
 pub const MARKER_PREFIX: &str = "tapes-parent:";
 
 /// The harnesses a marker may name.
-const HARNESSES: [&str; 4] = ["claude", "codex", "pi", "opencode"];
+const HARNESSES: [&str; 5] = ["antigravity", "claude", "codex", "pi", "opencode"];
 
 /// The longest session id a marker carries.
 const MAX_ID_BYTES: usize = 128;
@@ -154,6 +154,15 @@ mod tests {
             LaunchMarker::Parent {
                 harness: "pi".to_owned(),
                 id: "a.b_c-1".to_owned()
+            }
+        );
+        assert_eq!(
+            LaunchMarker::read(
+                "tapes-parent: antigravity:a0000000-0000-4000-8000-000000000001\nwork"
+            ),
+            LaunchMarker::Parent {
+                harness: "antigravity".to_owned(),
+                id: "a0000000-0000-4000-8000-000000000001".to_owned()
             }
         );
         for malformed in [

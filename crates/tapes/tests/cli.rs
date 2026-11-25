@@ -132,6 +132,7 @@ fn self_names_the_session_its_harness_exports() {
             "CODEX_THREAD_ID",
             "OPENCODE_SESSION",
             "PI_SESSION_ID",
+            "ANTIGRAVITY_CONVERSATION_ID",
         ] {
             command.env_remove(variable);
         }
@@ -275,6 +276,7 @@ fn self_uses_pi_session_file_for_native_discovery() {
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
+        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
         .output()
         .unwrap();
     assert!(

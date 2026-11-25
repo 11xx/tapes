@@ -78,6 +78,7 @@ impl Stores {
             .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("OPENCODE_SESSION")
             .env_remove("PI_SESSION_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
             .env("PATH", "/usr/bin:/bin")
             .current_dir(env!("CARGO_MANIFEST_DIR"));
         command

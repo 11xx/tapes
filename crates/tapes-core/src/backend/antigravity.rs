@@ -1,33 +1,103 @@
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use agent_tapes_discovery::{NativeSession, NativeStore};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{
-    attach_record_refs, read_recording, replay_pin, stream_jsonl, timestamp,
-    transcript_from_recording, ActivityRange, Backend, FoldedSession, Listing, Query,
-    StreamCoordinates, StreamOptions, StreamedTranscript, UnmappedTally,
+    accounting_for, attach_record_refs, first_prompt_in_file, marker_of, read_recording,
+    replay_pin, stream_jsonl, timestamp, transcript_from_recording, ActivityRange, Backend,
+    FoldedSession, Listing, Query, StreamCoordinates, StreamOptions, StreamedTranscript,
+    TokenTotals, UnmappedTally, DEFAULT_READ_BYTES,
 };
-use crate::antigravity_children::detached_children;
+use crate::antigravity_children::{detached_children, length_field};
 use crate::content::{text_part, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, SourceRef};
+use crate::measurement::{known_subtotal_notes, MeasurementCompleteness, MeasurementReason};
 use crate::model::{
-    EntryMetadata, KindDeclaration, Model, Role, Session, SourceDescriptor, Transcript, Turn,
+    AccountingBasis, AccountingCoverage, DisjointTokens, EntryMetadata, KindDeclaration, Model,
+    Role, Session, SourceDescriptor, SourceKind, TokenConvention, Tokens, Transcript, Turn,
     TurnKind, TurnSelection,
 };
+use crate::model_observation::Selections;
+use crate::pricing::RequestUses;
+use crate::span::{Placer, SpanBounds, SpanSessions};
+use crate::t3::query_sqlite;
+use crate::usage::{ModelUsage, ObservationBasis, UsageAttribution, UsageDetail};
 
 const HARNESS: &str = "antigravity";
+const MAX_METADATA_BLOB_BYTES: u64 = 65_536;
+const MAX_SEEN_STEPS: usize = 100_000;
 
-pub(super) struct AntigravityBackend {
+const DIRECT_TOKEN_KEYS: [&str; 6] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "thinking_tokens",
+    "reasoning_tokens",
+];
+
+const UNRECOGNIZED_USAGE_KEYS: [&str; 11] = [
+    "total_tokens",
+    "usage",
+    "usage_metadata",
+    "usageMetadata",
+    "token_usage",
+    "tokenUsage",
+    "cost",
+    "cost_usd",
+    "costUsd",
+    "total_cost",
+    "totalCost",
+];
+
+pub struct AntigravityBackend {
     store: NativeStore,
     read_bytes: u64,
+    native_root: Option<PathBuf>,
 }
 
 impl AntigravityBackend {
-    pub(super) fn new(store: NativeStore, read_bytes: u64) -> Self {
-        Self { store, read_bytes }
+    pub fn new(t3_home: impl Into<PathBuf>) -> Self {
+        Self::from_store(NativeStore::antigravity(t3_home), DEFAULT_READ_BYTES)
+    }
+
+    pub(super) fn from_store(store: NativeStore, read_bytes: u64) -> Self {
+        Self {
+            store,
+            read_bytes,
+            native_root: None,
+        }
+    }
+
+    pub fn with_read_bytes(mut self, read_bytes: u64) -> Self {
+        self.read_bytes = read_bytes;
+        self
+    }
+
+    pub(crate) fn with_native_root(mut self, root: PathBuf) -> Self {
+        self.native_root = Some(root);
+        self
+    }
+
+    fn source(&self, path: &Path, database: &Path) -> SourceDescriptor {
+        let mut source = SourceDescriptor::installed(HARNESS, path.display().to_string());
+        source.representation = "antigravity-acp-transcript".to_owned();
+        if self.native_root.is_some() {
+            source.kind = SourceKind::ExplicitNativeStore;
+        }
+        if let Some(location) = &mut source.location {
+            location.native_path = Some(path.to_path_buf());
+            location.container = Some(self.native_root.as_ref().map_or_else(
+                || database.display().to_string(),
+                |r| r.display().to_string(),
+            ));
+        }
+        source
     }
 
     fn session(&self, identity: &NativeSession) -> Result<Session> {
@@ -56,28 +126,28 @@ impl AntigravityBackend {
             path.display()
         );
         let latest_model = recording.tail.values.iter().rev().find_map(record_model);
+        let (model_observation, model_selections) = bounded_selections(&recording.tail);
         let mut activity = ActivityRange::default();
         for record in recording.head.iter().chain(&recording.tail.values) {
             activity.observe_timestamp(timestamp(&record["created_at"]));
         }
-        let mut source = SourceDescriptor::installed(HARNESS, path.display().to_string());
-        source.representation = "antigravity-acp-transcript".to_owned();
-        if let Some(location) = &mut source.location {
-            location.native_path = Some(path);
-            location.container = Some(database.display().to_string());
+        let mut usage = AntigravityUsage::default();
+        for record in &recording.tail.values {
+            usage.observe_record(record, None);
         }
+        let directory = workspace_directory(database);
         let mut session = Session {
             id: identity.id().to_owned(),
-            source,
+            source: self.source(&path, database),
             metadata: None,
             model: latest_model,
-            model_observation: None,
-            model_selections: Vec::new(),
+            model_observation,
+            model_selections,
             launch: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
-            directory: None,
+            directory,
             started_at: None,
             last_activity_at: None,
             live: None,
@@ -95,6 +165,12 @@ impl AntigravityBackend {
             && !opening
                 .iter()
                 .any(|record| timestamp(&record["created_at"]).is_some());
+        let coverage = if recording.tail.truncated {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        usage.apply(&mut session, coverage, recording.tail.skipped);
         Ok(
             session.with_derived_title_from(opening.iter().filter_map(|record| {
                 (record["type"] == "USER_INPUT" && record["source"] == "USER_EXPLICIT")
@@ -124,10 +200,17 @@ impl AntigravityBackend {
                 continue;
             }
             match self.session(&native) {
-                Ok(session) if query.scope.is_none() && query.matches(&session) => {
-                    listing.sessions.push(session);
+                Ok(session) => {
+                    let placed = query.scope.is_none_or(|scope| {
+                        session
+                            .directory
+                            .as_deref()
+                            .is_some_and(|directory| scope.contains(directory))
+                    });
+                    if placed && query.matches(&session) {
+                        listing.sessions.push(session);
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     listing.unavailable_ids.push(native.id().to_owned());
                     listing
@@ -143,6 +226,9 @@ impl AntigravityBackend {
     }
 
     fn t3_notes(&self, id: &str) -> Vec<String> {
+        if self.native_root.is_some() {
+            return Vec::new();
+        }
         let Some(root) = self.store.root() else {
             return Vec::new();
         };
@@ -159,6 +245,10 @@ impl AntigravityBackend {
 impl Backend for AntigravityBackend {
     fn harness(&self) -> &'static str {
         HARNESS
+    }
+
+    fn accounting_bases(&self) -> &'static [AccountingBasis] {
+        &[AccountingBasis::SummedRequests]
     }
 
     fn available(&self) -> bool {
@@ -209,7 +299,9 @@ impl Backend for AntigravityBackend {
         let domain = format!("file:{}", path.display());
         let mut turns = Vec::new();
         let mut unmapped = UnmappedTally::default();
+        let mut usage = AntigravityUsage::default();
         for (record, span) in recording.tail.values.iter().zip(&recording.tail.spans) {
+            usage.observe_record(record, None);
             let mut parsed = read_and_tally(record, &mut unmapped);
             attach_record_refs(
                 &mut parsed,
@@ -219,8 +311,22 @@ impl Backend for AntigravityBackend {
             );
             turns.extend(parsed);
         }
+        let mut updated = session.clone();
+        updated.model = recording.tail.values.iter().rev().find_map(record_model);
+        (updated.model_observation, updated.model_selections) = bounded_selections(&recording.tail);
+        let mut activity = ActivityRange::default();
+        for record in recording.head.iter().chain(&recording.tail.values) {
+            activity.observe_timestamp(timestamp(&record["created_at"]));
+        }
+        activity.apply(&mut updated);
+        let coverage = if recording.tail.truncated {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        usage.apply(&mut updated, coverage, recording.tail.skipped);
         let mut transcript = transcript_from_recording(
-            session.clone(),
+            updated,
             turns,
             tail,
             &recording,
@@ -237,6 +343,25 @@ impl Backend for AntigravityBackend {
 
     fn supports_full_search(&self) -> bool {
         true
+    }
+
+    fn first_prompt_markers(
+        &self,
+        sessions: &[&Session],
+    ) -> Vec<Option<Result<crate::launch_parent::LaunchMarker>>> {
+        sessions
+            .iter()
+            .map(|session| {
+                let path = match recording_path(session) {
+                    Ok(path) => path,
+                    Err(error) => return Some(Err(error)),
+                };
+                Some(
+                    first_prompt_in_file(path, HARNESS, &session.id, antigravity_prompt_text)
+                        .map(|record| marker_of(record.as_ref(), antigravity_prompt_text)),
+                )
+            })
+            .collect()
     }
 
     fn lineage(&self, session: &Session) -> Result<Lineage> {
@@ -278,15 +403,35 @@ impl Backend for AntigravityBackend {
         let domain = format!("file:{}", path.display());
         let mut whole = session.clone();
         whole.model = None;
+        whole.model_observation = None;
+        whole.model_selections = Vec::new();
+        whole.tokens = None;
+        whole.cost = None;
+        whole.accounting = None;
+        whole.usage_detail = None;
+        whole.list_price_estimate = None;
         let mut activity = ActivityRange::default();
         let mut unmapped = UnmappedTally::default();
+        let mut selections = Selections::default();
+        let mut usage = AntigravityUsage::default();
+        let mut placer = Placer::new(&[]).keeping(options.timeline);
+        let mut prev_end: Option<u64> = None;
         let mut stamps = super::TurnStamps::new(options);
         let mut emit = super::timed(&mut stamps, turn);
         let read = stream_jsonl(path, replay_pin(replay)?, |record, span, revision| {
-            activity.observe_timestamp(timestamp(&record["created_at"]));
+            if prev_end.is_some_and(|end| end != span.start) {
+                selections.interrupt();
+                placer.unreadable();
+            }
+            prev_end = Some(span.end);
+            let ts = timestamp(&record["created_at"]);
+            activity.observe_timestamp(ts);
             if let Some(model) = record_model(record) {
+                let step_id = record["step_index"].as_u64().map(|idx| idx.to_string());
+                selections.observe(model.clone(), ts, step_id.as_deref());
                 whole.model = Some(model);
             }
+            usage.observe_record(record, Some(&mut placer));
             let mut turns = read_and_tally(record, &mut unmapped);
             attach_record_refs(&mut turns, &domain, Some(revision), Some(span));
             let produced = !turns.is_empty();
@@ -296,8 +441,16 @@ impl Backend for AntigravityBackend {
             Ok(produced)
         })?;
         drop(emit);
+        if read.skipped > 0 {
+            selections.interrupt();
+        }
         activity.apply(&mut whole);
-        let (turn_times, requests, timeline_withheld) = stamps.finish(Ok(None));
+        whole.start_uncertain = false;
+        (whole.model_observation, whole.model_selections) = selections.finish(true);
+        let unrecognized_usage = usage.unrecognized_usage;
+        usage.apply(&mut whole, AccountingCoverage::Session, read.skipped);
+        let placed = placer.finish();
+        let (turn_times, requests, timeline_withheld) = stamps.finish(placed.timeline());
         let notes = replay.map_or_else(|| self.t3_notes(&session.id), |read| read.notes.clone());
         Ok(StreamedTranscript {
             coordinates: StreamCoordinates::FileBytes,
@@ -311,7 +464,7 @@ impl Backend for AntigravityBackend {
             terminal: None,
             notes,
             unmapped: Some(unmapped.finish()),
-            unrecognized_usage: 0,
+            unrecognized_usage,
             kinds: Some(self.kinds()),
             folded: Some(Box::new(FoldedSession {
                 asked: session.clone(),
@@ -328,6 +481,543 @@ impl Backend for AntigravityBackend {
         read.folded_for(session)
             .context("Antigravity stream belongs to a different session")
     }
+
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[SpanBounds],
+    ) -> Result<SpanSessions> {
+        let path = recording_path(session)?;
+        let mut records: Vec<(u64, SpanEvent)> = Vec::new();
+        let mut activity = ActivityRange::default();
+        let mut last_model = None;
+        let mut selections = Selections::default();
+        let mut prev_end: Option<u64> = None;
+        let streamed = stream_jsonl(path, Some(read.pin()?), |record, span, _| {
+            if prev_end.is_some_and(|end| end != span.start) {
+                selections.interrupt();
+            }
+            prev_end = Some(span.end);
+            let ts = timestamp(&record["created_at"]);
+            activity.observe_timestamp(ts);
+            if let Some(model) = record_model(record) {
+                let step_id = record["step_index"].as_u64().map(|idx| idx.to_string());
+                selections.observe(model.clone(), ts, step_id.as_deref());
+                last_model = Some(model);
+            }
+            if let Some(event) = classify_usage(record) {
+                records.push((span.start, event));
+            }
+            Ok(false)
+        })?;
+        if streamed.skipped > 0 {
+            selections.interrupt();
+        }
+        let mut placer = Placer::new(spans);
+        let mut whole_usage = AntigravityUsage::default();
+        let mut per_figure = vec![AntigravityUsage::default(); placer.figures()];
+        let mut gaps = streamed.gaps.iter().peekable();
+        for (start, event) in records {
+            while gaps.next_if(|gap| gap.span.start < start).is_some() {
+                placer.unreadable();
+            }
+            let held = whole_usage.observe_event(event.clone(), Some(&mut placer));
+            for index in held {
+                per_figure[index].observe_event(event.clone(), None);
+            }
+        }
+        for _ in gaps {
+            placer.unreadable();
+        }
+
+        let mut base = session.clone();
+        base.model = last_model;
+        base.tokens = None;
+        base.cost = None;
+        base.accounting = None;
+        base.usage_detail = None;
+        base.list_price_estimate = None;
+        base.start_uncertain = false;
+        activity.apply(&mut base);
+        (base.model_observation, base.model_selections) = selections.finish(true);
+
+        let mut whole = base.clone();
+        whole_usage.apply(&mut whole, AccountingCoverage::Session, streamed.skipped);
+
+        let placed = placer.finish();
+        let figures = per_figure
+            .into_iter()
+            .map(|usage| {
+                let mut figure = base.clone();
+                usage.apply(&mut figure, AccountingCoverage::Session, 0);
+                crate::span::keep_identity(&mut figure, &whole);
+                figure
+            })
+            .collect();
+        Ok(SpanSessions::assemble(placed, figures, whole, Vec::new()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestRecord {
+    step_index: Option<u64>,
+    at: Option<DateTime<Utc>>,
+    model: Option<Model>,
+    tokens: Tokens,
+    stopped: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SpanEvent {
+    Request(RequestRecord),
+    FailedAttempt { at: Option<DateTime<Utc>> },
+    UnrecognizedUsage { at: Option<DateTime<Utc>> },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CounterParse {
+    Absent,
+    Valid(u64),
+    Invalid,
+}
+
+fn parse_counter(record: &Value, key: &str) -> CounterParse {
+    match record.get(key) {
+        None | Some(Value::Null) => CounterParse::Absent,
+        Some(value) => match value.as_u64() {
+            Some(n) => CounterParse::Valid(n),
+            None => CounterParse::Invalid,
+        },
+    }
+}
+
+fn has_any_usage_key(record: &Value) -> bool {
+    let Some(map) = record.as_object() else {
+        return false;
+    };
+    DIRECT_TOKEN_KEYS
+        .iter()
+        .chain(UNRECOGNIZED_USAGE_KEYS.iter())
+        .any(|key| map.get(*key).is_some_and(|v| !v.is_null()))
+}
+
+fn has_unrecognized_usage_container(record: &Value) -> bool {
+    let Some(map) = record.as_object() else {
+        return false;
+    };
+    UNRECOGNIZED_USAGE_KEYS
+        .iter()
+        .any(|key| map.get(*key).is_some_and(|v| !v.is_null()))
+}
+
+fn parse_direct_tokens(record: &Value) -> Option<(Tokens, bool)> {
+    let input = parse_counter(record, "input_tokens");
+    let output = parse_counter(record, "output_tokens");
+    let cache_read = parse_counter(record, "cache_read_tokens");
+    let cache_write = parse_counter(record, "cache_write_tokens");
+    let thinking = parse_counter(record, "thinking_tokens");
+    let reasoning = parse_counter(record, "reasoning_tokens");
+    if [input, output, cache_read, cache_write, thinking, reasoning]
+        .contains(&CounterParse::Invalid)
+    {
+        return None;
+    }
+    let reasoning_val = match (thinking, reasoning) {
+        (CounterParse::Valid(t), CounterParse::Valid(r)) if t != r => return None,
+        (CounterParse::Valid(t), _) => Some(t),
+        (_, CounterParse::Valid(r)) => Some(r),
+        _ => None,
+    };
+    let val = |p: CounterParse| match p {
+        CounterParse::Valid(v) => Some(v),
+        _ => None,
+    };
+    let tokens = Tokens {
+        input: val(input),
+        output: val(output),
+        reasoning: reasoning_val,
+        cache_read: val(cache_read),
+        cache_write: val(cache_write),
+    };
+    let any_present = tokens.input.is_some()
+        || tokens.output.is_some()
+        || tokens.reasoning.is_some()
+        || tokens.cache_read.is_some()
+        || tokens.cache_write.is_some();
+    Some((tokens, any_present))
+}
+
+fn classify_usage(record: &Value) -> Option<SpanEvent> {
+    let typ = record["type"].as_str();
+    let source = record["source"].as_str();
+    let status = record["status"].as_str();
+    let at = timestamp(&record["created_at"]);
+    let step_index = record["step_index"].as_u64();
+
+    match (typ, source) {
+        (Some("PLANNER_RESPONSE"), Some("MODEL")) => {
+            if has_unrecognized_usage_container(record) {
+                return Some(SpanEvent::UnrecognizedUsage { at });
+            }
+            let Some((tokens, any_present)) = parse_direct_tokens(record) else {
+                return Some(SpanEvent::UnrecognizedUsage { at });
+            };
+            let model = record_model(record);
+            if status == Some("DONE") {
+                Some(SpanEvent::Request(RequestRecord {
+                    step_index,
+                    at,
+                    model,
+                    tokens,
+                    stopped: false,
+                }))
+            } else if any_present {
+                Some(SpanEvent::Request(RequestRecord {
+                    step_index,
+                    at,
+                    model,
+                    tokens,
+                    stopped: true,
+                }))
+            } else {
+                Some(SpanEvent::FailedAttempt { at })
+            }
+        }
+        (Some("CHECKPOINT"), Some("SYSTEM")) => {
+            if !has_any_usage_key(record) {
+                return None;
+            }
+            if has_unrecognized_usage_container(record) || status != Some("DONE") {
+                return Some(SpanEvent::UnrecognizedUsage { at });
+            }
+            let Some((tokens, any_present)) = parse_direct_tokens(record) else {
+                return Some(SpanEvent::UnrecognizedUsage { at });
+            };
+            if !any_present {
+                return Some(SpanEvent::UnrecognizedUsage { at });
+            }
+            Some(SpanEvent::Request(RequestRecord {
+                step_index,
+                at,
+                model: record_model_field(record),
+                tokens,
+                stopped: false,
+            }))
+        }
+        _ => has_any_usage_key(record).then_some(SpanEvent::UnrecognizedUsage { at }),
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ModelKey {
+    model: String,
+    variant: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct ModelAcc {
+    tokens: TokenTotals,
+    requests: usize,
+    stopped: bool,
+}
+
+#[derive(Clone, Default)]
+struct AntigravityUsage {
+    totals: TokenTotals,
+    by_model: BTreeMap<ModelKey, ModelAcc>,
+    unattributed_totals: TokenTotals,
+    observed: usize,
+    counted: usize,
+    attributed: usize,
+    unattributed: usize,
+    stopped_with_usage: usize,
+    request_failures: usize,
+    unrecognized_usage: usize,
+    conflicting_steps: usize,
+    step_bound_reached: bool,
+    seen_steps: HashMap<u64, (Tokens, Option<Model>)>,
+    uses: RequestUses,
+}
+
+impl AntigravityUsage {
+    fn observe_record(&mut self, record: &Value, placer: Option<&mut Placer>) -> Vec<usize> {
+        let Some(event) = classify_usage(record) else {
+            return Vec::new();
+        };
+        self.observe_event(event, placer)
+    }
+
+    fn observe_event(&mut self, event: SpanEvent, placer: Option<&mut Placer>) -> Vec<usize> {
+        match event {
+            SpanEvent::UnrecognizedUsage { at } => {
+                self.unrecognized_usage += 1;
+                placer.map_or_else(Vec::new, |p| {
+                    p.record(at, MeasurementReason::UnrecognizedUsage)
+                })
+            }
+            SpanEvent::FailedAttempt { at } => {
+                self.request_failures += 1;
+                placer.map_or_else(Vec::new, |p| {
+                    p.record(at, MeasurementReason::StoppedAttempt)
+                })
+            }
+            SpanEvent::Request(req) => {
+                self.observed += 1;
+                if let Some(step) = req.step_index {
+                    if let Some(prior) = self.seen_steps.get(&step) {
+                        if *prior == (req.tokens.clone(), req.model.clone()) {
+                            return Vec::new();
+                        }
+                        self.conflicting_steps += 1;
+                        return placer.map_or_else(Vec::new, |p| {
+                            p.record(req.at, MeasurementReason::Undetermined)
+                        });
+                    }
+                    if self.seen_steps.len() < MAX_SEEN_STEPS {
+                        self.seen_steps
+                            .insert(step, (req.tokens.clone(), req.model.clone()));
+                    } else {
+                        self.step_bound_reached = true;
+                    }
+                }
+                self.counted += 1;
+                if req.stopped {
+                    self.stopped_with_usage += 1;
+                }
+                self.totals.add(
+                    req.tokens.input,
+                    req.tokens.output,
+                    req.tokens.reasoning,
+                    req.tokens.cache_read,
+                    req.tokens.cache_write,
+                );
+                if let Some(convention) = TokenConvention::of(HARNESS) {
+                    let disjoint = DisjointTokens::from_native(&req.tokens, convention, None);
+                    self.uses.push(req.at, req.model.as_ref(), &disjoint);
+                } else {
+                    self.uses.discard();
+                }
+                match &req.model {
+                    Some(model) => {
+                        self.attributed += 1;
+                        let entry = self
+                            .by_model
+                            .entry(ModelKey {
+                                model: model.id.clone(),
+                                variant: model.variant.clone(),
+                            })
+                            .or_default();
+                        entry.tokens.add(
+                            req.tokens.input,
+                            req.tokens.output,
+                            req.tokens.reasoning,
+                            req.tokens.cache_read,
+                            req.tokens.cache_write,
+                        );
+                        entry.requests += 1;
+                        entry.stopped |= req.stopped;
+                    }
+                    None => {
+                        self.unattributed += 1;
+                        self.unattributed_totals.add(
+                            req.tokens.input,
+                            req.tokens.output,
+                            req.tokens.reasoning,
+                            req.tokens.cache_read,
+                            req.tokens.cache_write,
+                        );
+                    }
+                }
+                let step_id = req.step_index.map(|idx| idx.to_string());
+                placer.map_or_else(Vec::new, |p| p.request(req.at, step_id.as_deref()))
+            }
+        }
+    }
+
+    fn apply(self, session: &mut Session, coverage: AccountingCoverage, skipped: usize) {
+        let (tokens, measurement_coverage) = self.totals.finish_covered();
+        session.accounting = accounting_for(
+            tokens.as_ref(),
+            None,
+            &measurement_coverage,
+            AccountingBasis::SummedRequests,
+            coverage,
+        );
+        session.tokens = tokens;
+        session.cost = None;
+
+        let by_model = (!self.by_model.is_empty()).then(|| {
+            self.by_model
+                .into_iter()
+                .map(|(key, acc)| {
+                    let (tokens, cov) = acc.tokens.finish_covered();
+                    let incomplete = known_subtotal_notes(&cov);
+                    let mut completeness = MeasurementCompleteness::default();
+                    if acc.stopped {
+                        completeness.qualify_all(MeasurementReason::StoppedAttempt);
+                    }
+                    ModelUsage {
+                        list_price_estimate: None,
+                        cache_write_by_ttl: None,
+                        measurement_completeness: completeness,
+                        model: key.model,
+                        variant: key.variant,
+                        tokens,
+                        cost: None,
+                        cost_coverage: None,
+                        request_count: Some(acc.requests),
+                        measurement_coverage: cov,
+                        measurement_incomplete: incomplete,
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let attribution = (self.unattributed > 0).then(|| {
+            let (unattributed_tokens, unattributed_coverage) =
+                self.unattributed_totals.finish_covered();
+            UsageAttribution {
+                basis: ObservationBasis::UsageRecord,
+                coverage,
+                observed: self.observed,
+                counted: self.counted,
+                attributed: self.attributed,
+                unattributed: self.unattributed,
+                leading_uncounted: 0,
+                resets: 0,
+                outside_total: 0,
+                outside_total_tokens: None,
+                outside_total_coverage: BTreeMap::new(),
+                unattributed_tokens,
+                unattributed_coverage,
+                unattributed_completeness: MeasurementCompleteness::default(),
+                incomplete: vec!["unattributed".to_owned()],
+                bounds: Vec::new(),
+            }
+        });
+
+        let mut completeness = MeasurementCompleteness::default();
+        if self.stopped_with_usage > 0 {
+            completeness.qualify_all(MeasurementReason::StoppedAttempt);
+        }
+        if self.conflicting_steps > 0 || self.step_bound_reached {
+            completeness.qualify_all(MeasurementReason::Undetermined);
+        }
+        if skipped > 0 {
+            completeness.qualify_all(MeasurementReason::UnreadableRecord);
+        }
+
+        let mut accounting_notes = Vec::new();
+        if self.conflicting_steps > 0 {
+            accounting_notes.push(format!(
+                "{} Antigravity usage step(s) carried conflicting witnesses for the same step_index and were not summed.",
+                self.conflicting_steps
+            ));
+        }
+        if self.step_bound_reached {
+            accounting_notes.push(format!(
+                "Antigravity step deduplication reached the {MAX_SEEN_STEPS}-step bound."
+            ));
+        }
+
+        let measurement_incomplete = known_subtotal_notes(&measurement_coverage);
+        session.usage_detail = UsageDetail {
+            by_model,
+            attribution,
+            measurement_coverage,
+            measurement_incomplete,
+            measurement_completeness: completeness,
+            request_failures: self.request_failures,
+            unrecognized_usage: self.unrecognized_usage,
+            accounting_notes,
+            request_uses: Some(self.uses).filter(|uses| !uses.is_empty()),
+            ..UsageDetail::default()
+        }
+        .into_option();
+    }
+}
+
+fn bounded_selections(
+    read: &super::Jsonl,
+) -> (
+    Option<crate::model::ModelObservationStatus>,
+    Vec<crate::model::ModelSelectionSpan>,
+) {
+    let mut selections = Selections::default();
+    for (index, record) in read.values.iter().enumerate() {
+        if index > 0 && read.spans[index - 1].end != read.spans[index].start {
+            selections.interrupt();
+        }
+        if let Some(model) = record_model(record) {
+            let step_id = record["step_index"].as_u64().map(|idx| idx.to_string());
+            selections.observe(model, timestamp(&record["created_at"]), step_id.as_deref());
+        }
+    }
+    if read.skipped > 0 {
+        selections.interrupt();
+    }
+    selections.finish(!read.truncated)
+}
+
+fn workspace_directory(database: &Path) -> Option<PathBuf> {
+    let bound = MAX_METADATA_BLOB_BYTES * 2 + 256;
+    let rows = query_sqlite(
+        database,
+        &format!(
+            "SELECT hex(data) AS data FROM trajectory_metadata_blob
+             WHERE id = 'main' AND typeof(data) = 'blob' AND length(data) <= {MAX_METADATA_BLOB_BYTES}
+             LIMIT 1"
+        ),
+        bound,
+    )
+    .ok()?;
+    let [row] = rows.as_slice() else {
+        return None;
+    };
+    let hex = row["data"].as_str()?;
+    let bytes = decode_hex(hex)?;
+    let raw_uri = length_field(&bytes, 7)
+        .or_else(|| length_field(&bytes, 1).and_then(|ws| length_field(ws, 1)))?;
+    let uri = std::str::from_utf8(raw_uri).ok()?;
+    file_uri_to_path(uri)
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let encoded = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !encoded.starts_with('/') {
+        return None;
+    }
+    let decoded = percent_decode(encoded)?;
+    (!decoded.is_empty()).then(|| PathBuf::from(decoded))
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn recording_path(session: &Session) -> Result<&Path> {
@@ -358,10 +1048,22 @@ fn check_recording_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn antigravity_prompt_text(record: &Value) -> Option<String> {
+    (record["type"] == "USER_INPUT" && record["source"] == "USER_EXPLICIT")
+        .then(|| record["content"].as_str().map(str::to_owned))
+        .flatten()
+}
+
 fn record_model(record: &Value) -> Option<Model> {
     (record["type"] == "PLANNER_RESPONSE")
-        .then(|| record["model"].as_str().filter(|id| !id.is_empty()))
+        .then(|| record_model_field(record))
         .flatten()
+}
+
+fn record_model_field(record: &Value) -> Option<Model> {
+    record["model"]
+        .as_str()
+        .filter(|id| !id.is_empty())
         .map(|id| Model {
             id: id.to_owned(),
             variant: None,
@@ -530,5 +1232,84 @@ fn tool_event(
         artifact_references: Vec::new(),
         artifact_consumptions: Vec::new(),
         self_contained: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn file_uri_decodes_local_paths_and_rejects_non_file_schemes() {
+        assert_eq!(
+            file_uri_to_path("file:///home/lobo/code/my%20repo"),
+            Some(PathBuf::from("/home/lobo/code/my repo"))
+        );
+        assert_eq!(
+            file_uri_to_path("file://localhost/tmp/work"),
+            Some(PathBuf::from("/tmp/work"))
+        );
+        assert_eq!(file_uri_to_path("https://example.com/repo"), None);
+        assert_eq!(file_uri_to_path("file://relative"), None);
+    }
+
+    #[test]
+    fn usage_accumulator_deduplicates_identical_steps_and_flags_conflicts_and_checkpoints() {
+        let mut usage = AntigravityUsage::default();
+        let planner = json!({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": "2026-11-25T10:00:00Z",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 100,
+            "cache_read_tokens": 400,
+            "output_tokens": 50
+        });
+        usage.observe_record(&planner, None);
+        // Exact duplicate witness counts once.
+        usage.observe_record(&planner, None);
+        // Conflicting witness for the same step_index is not summed.
+        let conflicting = json!({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": "2026-11-25T10:00:01Z",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 999,
+            "cache_read_tokens": 400,
+            "output_tokens": 50
+        });
+        usage.observe_record(&conflicting, None);
+        // Checkpoint compaction call counts in total and enters unattributed.
+        let checkpoint = json!({
+            "step_index": 2,
+            "source": "SYSTEM",
+            "type": "CHECKPOINT",
+            "status": "DONE",
+            "created_at": "2026-11-25T10:01:00Z",
+            "input_tokens": 20,
+            "cache_read_tokens": 500,
+            "output_tokens": 10
+        });
+        usage.observe_record(&checkpoint, None);
+        // Unexpected usage-bearing step increments unrecognized_usage.
+        let unknown = json!({
+            "step_index": 3,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "status": "DONE",
+            "input_tokens": 7
+        });
+        usage.observe_record(&unknown, None);
+
+        assert_eq!(usage.counted, 2);
+        assert_eq!(usage.attributed, 1);
+        assert_eq!(usage.unattributed, 1);
+        assert_eq!(usage.conflicting_steps, 1);
+        assert_eq!(usage.unrecognized_usage, 1);
     }
 }

@@ -64,7 +64,9 @@ WHAT THE COUNTERS COVER
   an unrecognized type alone qualifies no figure: Claude's attachments are
   unrecognized and carry none. `unrecognized-usage` is raised, with the count
   in `unrecognized_usage`, only for a record no reading counts that carries
-  its harness's usage fields: for Claude a `message.usage` counter object on a
+  its harness's usage fields: for Antigravity a usage-bearing record outside
+  recognized `PLANNER_RESPONSE` and `CHECKPOINT` steps or with invalid token
+  counters; for Claude a `message.usage` counter object on a
   record that is not an assistant request; for Pi a `usage` object on an
   entry or its message holding a counter or total cost; for Codex a
   `payload.usage` counter object or a `payload.info` usage on a record other
@@ -83,8 +85,9 @@ WHAT THE COUNTERS COVER
   gap; a row with no place in the
   message order, or a part that names no message, takes a position after the
   last message.
-  A harness can attach only some accounting bases: Claude summed-requests or
-  recorded-total, Codex and OpenCode recorded-total, Pi summed-requests. Their
+  A harness can attach only some accounting bases: Antigravity and Pi
+  summed-requests, Claude summed-requests or recorded-total, Codex and OpenCode
+  recorded-total. Their
   span figures, and the windows built from them, sum requests.
   The text output names the same reasons, one line per incomplete figure:
   `completeness: input: missing-counter; output, cost: stopped-attempt` lists

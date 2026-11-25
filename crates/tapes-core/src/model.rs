@@ -715,14 +715,14 @@ pub enum OutputConvention {
 }
 
 impl TokenConvention {
-    /// The convention a harness's recorded counters follow. Claude, pi, and
-    /// OpenCode count uncached input apart from cache reads and writes, while
-    /// Codex counts cache reads inside `input`; OpenCode counts reasoning
-    /// beside `output`, and the others inside it. A harness whose convention
-    /// is not established has none.
+    /// The convention a harness's recorded counters follow. Antigravity,
+    /// Claude, pi, and OpenCode count uncached input apart from cache reads
+    /// and writes, while Codex counts cache reads inside `input`; OpenCode
+    /// counts reasoning beside `output`, and the others inside it. A harness
+    /// whose convention is not established has none.
     pub fn of(harness: &str) -> Option<Self> {
         let (input, output) = match harness {
-            "claude" | "pi" => (
+            "antigravity" | "claude" | "pi" => (
                 InputConvention::ExcludesCache,
                 OutputConvention::IncludesReasoning,
             ),

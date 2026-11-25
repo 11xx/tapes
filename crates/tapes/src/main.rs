@@ -401,15 +401,16 @@ struct InputArgs {
     /// OpenCode uses an API or database and cannot be selected by a root.
     #[arg(
         long,
-        value_name = "claude|codex|pi",
+        value_name = "antigravity|claude|codex|pi",
         requires = "native_root",
         conflicts_with = "input"
     )]
     native_store: Option<String>,
     /// Harness configuration root: Claude reads PATH/projects; Codex and Pi read
-    /// PATH/sessions. No harness environment is read or changed. `self` resolves
-    /// only within this store; --latest and --title default to this store unless
-    /// --here, --project, or --global gives a scope. No live state is attached.
+    /// PATH/sessions; Antigravity reads PATH/userdata/providers/antigravity. No
+    /// harness environment is read or changed. `self` resolves only within this
+    /// store; --latest and --title default to this store unless --here,
+    /// --project, or --global gives a scope. No live state is attached.
     #[arg(long, value_name = "PATH", requires = "native_store")]
     native_root: Option<PathBuf>,
     /// Select this exact native recording instead of enumerating the root.
@@ -492,6 +493,12 @@ impl InputArgs {
             .ok_or_else(|| anyhow!("--native-store requires --native-root"))?;
         use agent_tapes_core::NativeStore;
         let store = match (self.native_store.as_deref(), self.native_file.as_ref()) {
+            (Some("antigravity"), Some(_)) => {
+                return Err(anyhow!(
+                    "Antigravity reads a T3 home directory containing conversation databases and transcripts; --native-file is unsupported for antigravity"
+                ));
+            }
+            (Some("antigravity"), None) => NativeStore::antigravity(root),
             (Some("claude"), Some(path)) => NativeStore::claude_file(path),
             (Some("codex"), Some(path)) => NativeStore::codex_file(path),
             (Some("pi"), Some(path)) => NativeStore::pi_file(path),
@@ -499,7 +506,7 @@ impl InputArgs {
             (Some("codex"), None) => NativeStore::codex(root.join("sessions")),
             (Some("pi"), None) => NativeStore::pi(root.join("sessions")),
             (Some("opencode"), _) => return Err(anyhow!("OpenCode uses an API or database, not a configuration root; --native-store opencode is unsupported")),
-            _ => return Err(anyhow!("--native-store must be claude, codex, or pi")),
+            _ => return Err(anyhow!("--native-store must be antigravity, claude, codex, or pi")),
         };
         agent_tapes_core::backend::backends_from_native_root(store, root.clone(), bytes)
     }

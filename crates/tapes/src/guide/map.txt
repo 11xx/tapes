@@ -1,6 +1,7 @@
-tapes reads the sessions Claude Code, Codex, OpenCode and Pi record, through
-one model, and exports them for another session to continue. It never writes
-to a harness's store, so no command here can disturb a live session.
+tapes reads the sessions Antigravity, Claude Code, Codex, OpenCode and Pi
+record, through one model, and exports them for another session to continue.
+It never writes to a harness's store, so no command here can disturb a live
+session.
 
 This map is complete in under 80 lines: read all of it. Depth comes one topic
 at a time. `tapes guide` lists the topics; `tapes <command> --help` is a
@@ -54,7 +55,7 @@ COUNT AND PRICE
 READ ANOTHER SOURCE
   --input PATH                   a ChatGPT or Perplexity export
   --remote SSH-DESTINATION       another machine's tapes, asked over ssh
-  --native-store H --native-root DIR   a copied Claude, Codex or Pi store
+  --native-store H --native-root DIR   a copied Antigravity, Claude, Codex or Pi store
   Each names the only source read. None falls back to the installed stores.
   Topics: input remote native-store
 

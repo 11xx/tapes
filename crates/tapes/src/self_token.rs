@@ -17,12 +17,13 @@ pub const TOKEN: &str = "self";
 /// is set by hand and `CLAUDE_CODE_SESSION_ID` is what Claude Code exports,
 /// so a deliberately exported id beats the ambient one. OpenCode v2 exports
 /// no session id, so it has no rung.
-const LADDER: [(&str, &str); 5] = [
+const LADDER: [(&str, &str); 6] = [
     ("CLAUDE_SESSION_ID", "claude"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
     ("OPENCODE_SESSION", "opencode"),
     ("PI_SESSION_ID", "pi"),
+    ("ANTIGRAVITY_CONVERSATION_ID", "antigravity"),
 ];
 
 /// What `self` resolved to, and the variable that said so.
@@ -130,6 +131,15 @@ mod tests {
         let detected = detect(env(&[("CLAUDE_SESSION_ID", " "), ("PI_SESSION_ID", "p1")])).unwrap();
         assert_eq!(detected.variable, "PI_SESSION_ID");
         assert_eq!(detected.harness, "pi");
+
+        let ag = detect(env(&[(
+            "ANTIGRAVITY_CONVERSATION_ID",
+            "a0000000-0000-4000-8000-000000000001",
+        )]))
+        .unwrap();
+        assert_eq!(ag.variable, "ANTIGRAVITY_CONVERSATION_ID");
+        assert_eq!(ag.harness, "antigravity");
+        assert_eq!(ag.id, "a0000000-0000-4000-8000-000000000001");
 
         let error = detect(env(&[])).unwrap_err().to_string();
         for (variable, _) in LADDER {
