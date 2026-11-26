@@ -5,7 +5,10 @@
 //! keeping that reason rather than gaining `missing-counter`.
 
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
-use agent_tapes_core::model::{DisjointTokens, Model, TokenConvention, Tokens};
+use agent_tapes_core::model::{
+    DisjointTokens, Model, ModelObservationStatus, ModelSelectionRecord, ModelSelectionSpan,
+    TokenConvention, Tokens,
+};
 use agent_tapes_core::pricing::{
     Billing, ListPriceEstimate, PriceTable, PricedFigure, PricedShare, RequestTerms, RequestUses,
 };
@@ -319,4 +322,160 @@ fn an_undetermined_category_under_terms_keeps_the_share_reason_alone() {
         entry.measurement_completeness
     );
     assert_eq!(figure[0].as_ref(), Some(&entry));
+}
+
+/// Claim: variant-qualified price rows take precedence (`<id>-<variant>` then
+/// `<id>#<variant>`) over base `<id>` rows, and a figure with multiple
+/// variants of one base model prices each variant share at its own row when
+/// variant-specific rows exist, while falling back to the base row otherwise.
+#[test]
+fn variant_qualified_price_rows_take_precedence_and_fall_back_to_base() {
+    let table = PriceTable::parse(
+        r#"
+schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-fixture"
+effective = 2026-10-19
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.0, output = 2.0 }
+
+[[models]]
+id = "gemini-fixture-high"
+effective = 2026-10-19
+source = "fixture"
+per_million = { uncached_input = 3.0, cache_read = 0.3, cache_write_5m = 3.0, output = 6.0 }
+
+[[models]]
+id = "gemini-fixture#high"
+effective = 2026-10-19
+source = "fixture"
+per_million = { uncached_input = 9.0, cache_read = 0.9, cache_write_5m = 9.0, output = 18.0 }
+
+[[models]]
+id = "gemini-fixture#max"
+effective = 2026-10-19
+source = "fixture"
+per_million = { uncached_input = 5.0, cache_read = 0.5, cache_write_5m = 5.0, output = 10.0 }
+"#,
+    )
+    .unwrap();
+    let convention = TokenConvention::of("antigravity").unwrap();
+    let disjoint = DisjointTokens::from_native(&tokens(1_000_000, 0, 0), convention, None);
+
+    let price_variant = |variant: Option<&str>| {
+        PricedShare {
+            disjoint: &disjoint,
+            model: "gemini-fixture",
+            variant,
+            sole: false,
+            terms: RequestTerms::default(),
+        }
+        .estimate(&table)
+        .finish()
+        .unwrap()
+    };
+
+    // `<id>-<variant>` beats `<id>#<variant>` and `<id>`.
+    let high = price_variant(Some("high"));
+    assert!((high.amount.unwrap() - 3.0).abs() < 1e-12);
+    assert_eq!(high.models[0].id, "gemini-fixture-high");
+
+    // `<id>#<variant>` beats `<id>` when `<id>-<variant>` is absent.
+    let max = price_variant(Some("max"));
+    assert!((max.amount.unwrap() - 5.0).abs() < 1e-12);
+    assert_eq!(max.models[0].id, "gemini-fixture#max");
+
+    // Unlisted variant falls back to base `<id>`.
+    let low = price_variant(Some("low"));
+    assert!((low.amount.unwrap() - 1.0).abs() < 1e-12);
+    assert_eq!(low.models[0].id, "gemini-fixture");
+
+    // Multi-variant figure over one base model sums distinct variant rates instead
+    // of collapsing into a single base sole-model estimate.
+    let mut high_share = share("gemini-fixture", tokens(1_000_000, 0, 0));
+    high_share.variant = Some("high".to_owned());
+    let mut low_share = share("gemini-fixture", tokens(1_000_000, 0, 0));
+    low_share.variant = Some("low".to_owned());
+    let shares = [high_share, low_share];
+    let whole_disjoint = DisjointTokens::from_native(&tokens(2_000_000, 0, 0), convention, None);
+    let rec = ModelSelectionRecord {
+        timestamp: None,
+        native_id: None,
+    };
+    let selections = [
+        ModelSelectionSpan {
+            model: Model {
+                id: "gemini-fixture".to_owned(),
+                variant: Some("high".to_owned()),
+            },
+            first: rec.clone(),
+            last: rec.clone(),
+        },
+        ModelSelectionSpan {
+            model: Model {
+                id: "gemini-fixture".to_owned(),
+                variant: Some("low".to_owned()),
+            },
+            first: rec.clone(),
+            last: rec,
+        },
+    ];
+    let figure = PricedFigure {
+        disjoint: Some(&whole_disjoint),
+        convention: Some(convention),
+        model: Some(&selections[1].model),
+        selections: &selections,
+        observation: Some(&ModelObservationStatus {
+            mixed: true,
+            head_read: true,
+            attribution_uncertain: false,
+            distinct_observed: Some(2),
+        }),
+        by_model: Some(&shares),
+        terms: RequestTerms::default(),
+    }
+    .estimate(&table);
+    let whole = figure.whole.and_then(|sum| sum.finish()).unwrap();
+    assert!((whole.amount.unwrap() - 4.0).abs() < 1e-12);
+}
+
+/// Claim: a figure with an explicit empty model split (`by_model: Some(&[])`)
+/// and uncertain attribution withholds its estimate even when the surrounding
+/// session's selections name a single base model.
+#[test]
+fn empty_model_split_under_uncertain_attribution_withholds_sole_model_fallback() {
+    let table = PriceTable::parse(PLAIN_TABLE).unwrap();
+    let convention = TokenConvention::of("antigravity").unwrap();
+    let disjoint = DisjointTokens::from_native(&tokens(100, 5_000, 50), convention, None);
+    let model = Model {
+        id: "gpt-a-fixture".to_owned(),
+        variant: Some("high".to_owned()),
+    };
+    let rec = ModelSelectionRecord {
+        timestamp: None,
+        native_id: None,
+    };
+    let selections = [ModelSelectionSpan {
+        model: model.clone(),
+        first: rec.clone(),
+        last: rec,
+    }];
+    let figure = PricedFigure {
+        disjoint: Some(&disjoint),
+        convention: Some(convention),
+        model: Some(&model),
+        selections: &selections,
+        observation: Some(&ModelObservationStatus {
+            mixed: false,
+            head_read: true,
+            attribution_uncertain: true,
+            distinct_observed: Some(1),
+        }),
+        by_model: Some(&[]),
+        terms: RequestTerms::default(),
+    }
+    .estimate(&table);
+    assert!(figure.whole.is_none());
 }

@@ -1206,13 +1206,19 @@ impl Session {
                 }
                 models
             });
+        let by_model = models.as_deref().or_else(|| {
+            detail
+                .and_then(|detail| detail.attribution.as_ref())
+                .is_some_and(|attribution| attribution.unattributed > 0)
+                .then_some(&[][..])
+        });
         PricedFigure {
             disjoint: disjoint.as_ref(),
             convention: None,
             model: self.model.as_ref(),
             selections: &self.model_selections,
             observation: self.model_observation.as_ref(),
-            by_model: models.as_deref(),
+            by_model,
             terms: crate::pricing::RequestTerms {
                 requests: detail.and_then(|detail| detail.request_uses.as_ref()),
                 billing: detail.and_then(|detail| detail.billing.as_ref()),

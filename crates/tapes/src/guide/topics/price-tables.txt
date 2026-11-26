@@ -39,7 +39,9 @@ PRICE TABLES AND LIST-PRICE ESTIMATES
   Prices are per million tokens of each disjoint category; reasoning is a
   share of output and priced as output. A category a row leaves out has no
   price. Unknown keys, negative or non-finite prices, a non-date
-  `effective`, and an id or alias named twice refuse, naming the entry. A
+  `effective`, and an id or alias named twice refuse, naming the entry. When a
+  model carries a variant, lookup checks `<id>-<variant>` then `<id>#<variant>`
+  before falling back to `<id>`. A
   recorded id ending in `-YYYYMMDD` that no row names is priced by the row
   naming the id without that date.
   tapes-price-table/2 takes the same rows, and a row may add terms priced

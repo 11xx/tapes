@@ -766,6 +766,40 @@ impl PriceTable {
             .map(|position| &self.models[*position])
     }
 
+    /// Every row that names a variant-qualified model id (`<id>-<variant>` or
+    /// `<id>#<variant>`), by id or alias, without falling back to `id`.
+    fn variant_rows<'a>(
+        &'a self,
+        id: &str,
+        variant: &str,
+    ) -> Option<impl Iterator<Item = &'a ModelPrice> + 'a> {
+        let hyphen = format!("{id}-{variant}");
+        let hash = format!("{id}#{variant}");
+        self.index
+            .get(&hyphen)
+            .or_else(|| undated(&hyphen).and_then(|undated| self.index.get(undated)))
+            .or_else(|| self.index.get(&hash))
+            .or_else(|| undated(&hash).and_then(|undated| self.index.get(undated)))
+            .map(|positions| positions.iter().map(|position| &self.models[*position]))
+    }
+
+    /// Whether the table names any row specifically for `(id, variant)` via
+    /// `<id>-<variant>` or `<id>#<variant>`.
+    pub fn has_variant_row(&self, id: &str, variant: &str) -> bool {
+        !variant.is_empty() && self.variant_rows(id, variant).is_some()
+    }
+
+    /// Every row that prices `(id, variant)`, checking `<id>-<variant>` then
+    /// `<id>#<variant>` before falling back to `id` (and its undated base).
+    pub fn rows_for<'a>(&'a self, id: &str, variant: Option<&str>) -> Vec<&'a ModelPrice> {
+        if let Some(variant) = variant.filter(|variant| !variant.is_empty()) {
+            if let Some(rows) = self.variant_rows(id, variant) {
+                return rows.collect();
+            }
+        }
+        self.rows(id).collect()
+    }
+
     /// The table written as a `tapes-price-table/2` document that
     /// [`Self::parse`] reads back to the same rows.
     pub fn to_toml(currency: &str, models: &[ModelPrice]) -> Result<String> {
@@ -1524,17 +1558,19 @@ pub struct PricedShare<'a> {
 impl PricedShare<'_> {
     /// Price the share under `table`, as [`PricedFigure::estimate`] prices
     /// each share of a figure; the sum finishes to the estimate a share of a
-    /// usage answer shows. A model whose one row prices every token of a
-    /// category at one rate is priced as [`price_share`] prices it, a model
-    /// the table lacks is `unlisted-model`, and a model whose rows carry
-    /// terms priced by the request is priced request by request over the
+    /// usage answer shows. When `variant` is present, lookup checks
+    /// `<model>-<variant>` then `<model>#<variant>` before falling back to
+    /// `model` (and its undated base). A model whose one row prices every
+    /// token of a category at one rate is priced as [`price_share`] prices it,
+    /// a model the table lacks is `unlisted-model`, and a model whose rows
+    /// carry terms priced by the request is priced request by request over the
     /// share's requests and between every rate it could pay for the rest.
     /// Each category keeps the reasons the share gives it. A category the
     /// share holds no amount for is a `missing-counter` only where the share
     /// gives it no reason, so a category the share left `undetermined` stays
     /// so.
     pub fn estimate(&self, table: &PriceTable) -> EstimateSum {
-        let rows = table.rows(self.model).collect::<Vec<_>>();
+        let rows = table.rows_for(self.model, self.variant);
         match rows.as_slice() {
             [] => price_share(self.disjoint, None, table),
             [row] if row.is_plain() => price_share(self.disjoint, Some(row), table),
@@ -1927,33 +1963,56 @@ pub struct FigureEstimate {
 }
 
 impl PricedFigure<'_> {
-    /// The one model id the figure's model evidence names, if it names
-    /// exactly one.
-    fn sole_model(&self) -> Option<&str> {
-        let ids = if self.selections.is_empty() {
+    /// The one model (and variant, when uniform) that prices the whole figure
+    /// under `table`. Multiple variants of one base model share a sole price
+    /// only when none of those variants carries a variant-specific row in
+    /// `table`.
+    fn sole_model<'a>(&'a self, table: &PriceTable) -> Option<(&'a str, Option<&'a str>)> {
+        let observed: BTreeSet<(&str, Option<&str>)> = if self.selections.is_empty() {
             if self.observation.is_some_and(|status| status.mixed) {
                 return None;
             }
             self.model
-                .map(|model| model.id.as_str())
+                .map(|model| (model.id.as_str(), model.variant.as_deref()))
                 .into_iter()
-                .collect::<BTreeSet<_>>()
+                .collect()
         } else {
             self.selections
                 .iter()
-                .map(|span| span.model.id.as_str())
-                .collect::<BTreeSet<_>>()
+                .map(|span| (span.model.id.as_str(), span.model.variant.as_deref()))
+                .collect()
         };
-        (ids.len() == 1).then(|| *ids.iter().next().unwrap())
+        let ids: BTreeSet<&str> = observed.iter().map(|(id, _)| *id).collect();
+        if ids.len() != 1 {
+            return None;
+        }
+        let id = *ids.iter().next().unwrap();
+        let shares = self.by_model.unwrap_or_default();
+        if !shares.iter().all(|model| model.model == id) {
+            return None;
+        }
+        let mut variants: BTreeSet<Option<&str>> =
+            observed.iter().map(|(_, variant)| *variant).collect();
+        variants.extend(shares.iter().map(|model| model.variant.as_deref()));
+        if variants.len() == 1 {
+            return Some((id, *variants.iter().next().unwrap()));
+        }
+        let variant_priced = variants
+            .iter()
+            .flatten()
+            .any(|variant| table.has_variant_row(id, variant));
+        (!variant_priced).then_some((id, None))
     }
 
     /// Price the figure under `table`. A figure whose evidence names one
     /// model is that model's share whole, and a split the harness recorded
-    /// for the same model prices each part alike. A figure that names more
-    /// than one model, or whose uncertain attribution leaves part of it out
-    /// of its model shares, is priced share by share from its split, and
-    /// what the shares leave of the whole is `incomplete-attribution`. A
-    /// figure with neither has no estimate.
+    /// for the same model prices each part alike unless `table` assigns a
+    /// distinct variant-qualified row. A figure that names more than one
+    /// model, whose variants resolve to distinct rows, or whose uncertain
+    /// attribution leaves part of it out of its recorded model split (including
+    /// an empty split when every request is unattributed) is priced share by
+    /// share from its split, and what the shares leave of the whole is
+    /// `incomplete-attribution`. A figure with neither has no estimate.
     pub fn estimate(&self, table: &PriceTable) -> FigureEstimate {
         let convention = self
             .convention
@@ -1993,25 +2052,25 @@ impl PricedFigure<'_> {
             };
         };
         let parts = shares.iter().map(share_disjoint).collect::<Vec<_>>();
-        // Under uncertain attribution, shares that leave part of the figure
-        // unattributed say the one model in evidence did not serve all of it.
+        // Under uncertain attribution, a recorded model split that is empty
+        // (every request unattributed) or leaves part of the figure uncovered
+        // says the one model in evidence did not serve all of it.
         let unattributed = self
             .observation
             .is_some_and(|status| status.attribution_uncertain)
-            && !shares.is_empty()
-            && PRICED_CATEGORIES.iter().any(|category| {
-                category_amount(disjoint, category).is_some()
-                    && !shares_cover(disjoint, &parts, category)
+            && self.by_model.is_some_and(|shares| {
+                shares.is_empty()
+                    || PRICED_CATEGORIES.iter().any(|category| {
+                        category_amount(disjoint, category).is_some()
+                            && !shares_cover(disjoint, &parts, category)
+                    })
             });
-        let sole = self
-            .sole_model()
-            .filter(|sole| shares.iter().all(|model| model.model == *sole))
-            .filter(|_| !unattributed);
-        let whole = if let Some(sole) = sole {
+        let sole = self.sole_model(table).filter(|_| !unattributed);
+        let whole = if let Some((model, variant)) = sole {
             let mut sum = PricedShare {
                 disjoint,
-                model: sole,
-                variant: None,
+                model,
+                variant,
                 sole: true,
                 terms: self.terms,
             }
@@ -2078,13 +2137,19 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
         from: view.session.started_at,
         to: view.session.last_activity_at,
     };
+    let by_model = view.by_model.as_deref().or_else(|| {
+        view.attribution
+            .as_ref()
+            .is_some_and(|attribution| attribution.unattributed > 0)
+            .then_some(&[][..])
+    });
     let estimate = PricedFigure {
         disjoint: view.disjoint.as_ref(),
         convention: None,
         model: view.session.model.as_ref(),
         selections: &view.session.model_selections,
         observation: view.session.model_observation.as_ref(),
-        by_model: view.by_model.as_deref(),
+        by_model,
         terms,
     }
     .estimate(table);

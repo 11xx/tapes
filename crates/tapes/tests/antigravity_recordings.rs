@@ -643,6 +643,27 @@ fn antigravity_usage_accounting_directory_scope_spans_pricing_and_self() {
 currency = "USD"
 
 [[models]]
+id = "gemini-4-neon-high"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.0, cache_write_1h = 1.0, output = 2.0 }
+
+[[models]]
+id = "gemini-4-neon-xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, cache_write_1h = 2.0, output = 4.0 }
+"#,
+    )
+    .unwrap();
+
+    let base_prices_file = f.0.path().join("base-prices.toml");
+    fs::write(
+        &base_prices_file,
+        r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
 id = "gemini-4-neon"
 effective = 2026-01-01
 source = "fixture"
@@ -651,6 +672,8 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, ca
     )
     .unwrap();
 
+    // Effort-suffixed price rows with distinct per-effort rates continue to match
+    // both whole sessions and spans.
     let rich_usage: Value = serde_json::from_str(success(&f.run(&[
         "usage",
         rich_id,
@@ -698,14 +721,15 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, ca
         serde_json::json!({"id": "gemini-4-neon", "variant": "xhigh"})
     );
     assert!(rich_usage["cost"].is_null());
-    // Attributed tokens (1500 in * 2.0 + 5000 cr * 0.2 + 500 out * 4.0) / 1e6 = 0.006 USD;
-    // unattributed CHECKPOINT tokens stay unpriced and qualify incomplete-attribution.
+    // high: (1000*1.0 + 2000*0.1 + 300*2.0) / 1e6 = 0.0018 USD
+    // xhigh: (500*2.0 + 3000*0.2 + 200*4.0) / 1e6 = 0.0024 USD
+    // total attributed = 0.0042 USD; unattributed CHECKPOINT stays unpriced.
     let estimate_amount = rich_usage["list_price_estimate"]["amount"]
         .as_f64()
         .unwrap();
     assert!(
-        (estimate_amount - 0.006).abs() < 1e-9,
-        "expected 0.006, got {estimate_amount}"
+        (estimate_amount - 0.0042).abs() < 1e-9,
+        "expected 0.0042, got {estimate_amount}"
     );
     assert!(
         rich_usage["list_price_estimate"]["measurement_completeness"]["uncached_input"]
@@ -715,36 +739,153 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, ca
             .any(|reason| reason == "incomplete-attribution")
     );
 
-    // Span split selects only step 2 in [10:00:04Z, 10:00:08Z).
-    let span_out: Value = serde_json::from_str(success(&f.run(&[
+    // Base-model price row fallback prices all variants of gemini-4-neon and still
+    // withholds unattributed CHECKPOINT tokens.
+    let rich_base_usage: Value = serde_json::from_str(success(&f.run(&[
         "usage",
         rich_id,
         "--harness",
         "antigravity",
-        "--from",
-        "2026-01-01T10:00:04Z",
-        "--to",
-        "2026-01-01T10:00:08Z",
+        "--full",
+        "--prices",
+        base_prices_file.to_str().unwrap(),
+        "--json",
+    ])))
+    .unwrap();
+    // Attributed tokens (1500 in * 2.0 + 5000 cr * 0.2 + 500 out * 4.0) / 1e6 = 0.006 USD.
+    let base_amount = rich_base_usage["list_price_estimate"]["amount"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        (base_amount - 0.006).abs() < 1e-9,
+        "expected 0.006, got {base_amount}"
+    );
+    assert!(
+        rich_base_usage["list_price_estimate"]["measurement_completeness"]["uncached_input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "incomplete-attribution")
+    );
+
+    // Single-variant session (`ID`, gemini-4-neon-high) also prices against an
+    // effort-suffixed-only table across `usage`, `show`, and `list`.
+    let single_suffixed_usage: Value = serde_json::from_str(success(&f.run(&[
+        "usage",
+        ID,
+        "--harness",
+        "antigravity",
+        "--full",
         "--prices",
         prices_file.to_str().unwrap(),
         "--json",
     ])))
     .unwrap();
-    assert_eq!(span_out["tokens"]["input"], 500);
-    assert_eq!(span_out["tokens"]["cache_read"], 3000);
-    assert_eq!(span_out["tokens"]["output"], 200);
-    assert_eq!(span_out["by_model"][0]["model"], "gemini-4-neon");
-    assert_eq!(span_out["by_model"][0]["variant"], "xhigh");
-    let span_amount = span_out["list_price_estimate"]["amount"].as_f64().unwrap();
+    // 361 in * 1.0 + 35 out * 2.0 = 431 / 1e6 = 0.000431 USD.
+    let single_amount = single_suffixed_usage["list_price_estimate"]["amount"]
+        .as_f64()
+        .unwrap();
     assert!(
-        (span_amount - 0.0024).abs() < 1e-9,
-        "expected 0.0024, got {span_amount}"
+        (single_amount - 0.000431).abs() < 1e-9,
+        "expected 0.000431, got {single_amount}"
     );
+    assert_eq!(
+        single_suffixed_usage["list_price_estimate"]["models"][0]["id"],
+        "gemini-4-neon-high"
+    );
+    let single_suffixed_show: Value = serde_json::from_str(success(&f.run(&[
+        "show",
+        ID,
+        "--harness",
+        "antigravity",
+        "--prices",
+        prices_file.to_str().unwrap(),
+        "--json",
+    ])))
+    .unwrap();
     assert!(
-        span_out["list_price_estimate"]["measurement_completeness"]["uncached_input"].is_null()
+        (single_suffixed_show["session"]["list_price_estimate"]["amount"]
+            .as_f64()
+            .unwrap()
+            - 0.000431)
+            .abs()
+            < 1e-9
     );
-    assert!(span_out["list_price_estimate"]["measurement_completeness"]["cache_read"].is_null());
-    assert!(span_out["list_price_estimate"]["measurement_completeness"]["output"].is_null());
+
+    // Span split selects only step 2 in [10:00:04Z, 10:00:08Z).
+    for table in [&prices_file, &base_prices_file] {
+        let span_out: Value = serde_json::from_str(success(&f.run(&[
+            "usage",
+            rich_id,
+            "--harness",
+            "antigravity",
+            "--from",
+            "2026-01-01T10:00:04Z",
+            "--to",
+            "2026-01-01T10:00:08Z",
+            "--prices",
+            table.to_str().unwrap(),
+            "--json",
+        ])))
+        .unwrap();
+        assert_eq!(span_out["tokens"]["input"], 500);
+        assert_eq!(span_out["tokens"]["cache_read"], 3000);
+        assert_eq!(span_out["tokens"]["output"], 200);
+        assert_eq!(span_out["by_model"][0]["model"], "gemini-4-neon");
+        assert_eq!(span_out["by_model"][0]["variant"], "xhigh");
+        let span_amount = span_out["list_price_estimate"]["amount"].as_f64().unwrap();
+        assert!(
+            (span_amount - 0.0024).abs() < 1e-9,
+            "expected 0.0024, got {span_amount}"
+        );
+        assert!(
+            span_out["list_price_estimate"]["measurement_completeness"]["uncached_input"].is_null()
+        );
+        assert!(
+            span_out["list_price_estimate"]["measurement_completeness"]["cache_read"].is_null()
+        );
+        assert!(span_out["list_price_estimate"]["measurement_completeness"]["output"].is_null());
+    }
+
+    // Checkpoint-only span [10:00:09Z, 10:00:11Z) holds only unattributed usage:
+    // preserves session selection evidence while withholding list_price_estimate.
+    for table in [&base_prices_file, &prices_file] {
+        let checkpoint_span: Value = serde_json::from_str(success(&f.run(&[
+            "usage",
+            rich_id,
+            "--harness",
+            "antigravity",
+            "--from",
+            "2026-01-01T10:00:09Z",
+            "--to",
+            "2026-01-01T10:00:11Z",
+            "--prices",
+            table.to_str().unwrap(),
+            "--json",
+        ])))
+        .unwrap();
+        assert_eq!(checkpoint_span["tokens"]["input"], 100);
+        assert_eq!(checkpoint_span["tokens"]["cache_read"], 5000);
+        assert_eq!(checkpoint_span["tokens"]["output"], 50);
+        assert!(checkpoint_span["by_model"].is_null());
+        assert_eq!(checkpoint_span["attribution"]["attributed"], 0);
+        assert_eq!(checkpoint_span["attribution"]["unattributed"], 1);
+        assert_eq!(
+            checkpoint_span["session"]["model_observation"]["attribution_uncertain"],
+            true
+        );
+        assert_eq!(
+            checkpoint_span["session"]["model_selections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            checkpoint_span["list_price_estimate"].is_null(),
+            "checkpoint-only span must not be priced as session model: {checkpoint_span:#}"
+        );
+    }
 
     // 6. Launch-parent marker links child `rich_id` into `ID`'s family.
     let family_out: Value = serde_json::from_str(success(&f.run(&[
@@ -931,7 +1072,9 @@ fn antigravity_splits_effort_suffixes_and_preserves_unsuffixed_models() {
     assert_eq!(filtered_unsuffixed["sessions"][0]["id"], unsuffixed_id);
     assert!(filtered_unsuffixed["sessions"][0]["model"]["variant"].is_null());
 
-    // `usage` separates variants in `by_model`, formats them in human output, and prices by base id.
+    // `usage` separates variants in `by_model`, formats them in human output, and
+    // applies variant-qualified row precedence (`<id>-<variant>` then `<id>#<variant>`)
+    // before falling back to the base `<id>` row.
     let prices_file = f.0.path().join("multi-prices.toml");
     fs::write(
         &prices_file,
@@ -945,10 +1088,22 @@ source = "fixture"
 per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.0, cache_write_1h = 1.0, output = 2.0 }
 
 [[models]]
+id = "gemini-4-neon-xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 3.0, cache_read = 0.3, cache_write_5m = 3.0, cache_write_1h = 3.0, output = 6.0 }
+
+[[models]]
 id = "claude-opus-5-5"
 effective = 2026-01-01
 source = "fixture"
 per_million = { uncached_input = 5.0, cache_read = 0.5, cache_write_5m = 5.0, cache_write_1h = 5.0, output = 25.0 }
+
+[[models]]
+id = "claude-opus-5-5#max"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 10.0, cache_read = 1.0, cache_write_5m = 10.0, cache_write_1h = 10.0, output = 50.0 }
 
 [[models]]
 id = "gemini-flash-worker-agy"
@@ -983,6 +1138,10 @@ per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.5, c
             });
         assert_eq!(entry["request_count"], 1);
     }
+    let neon_low = by_model
+        .iter()
+        .find(|row| row["model"] == "gemini-4-neon" && row["variant"] == "low")
+        .unwrap();
     let neon_xhigh = by_model
         .iter()
         .find(|row| row["model"] == "gemini-4-neon" && row["variant"] == "xhigh")
@@ -991,15 +1150,41 @@ per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.5, c
         .iter()
         .find(|row| row["model"] == "claude-opus-5-5" && row["variant"] == "high")
         .unwrap();
+    let opus_max = by_model
+        .iter()
+        .find(|row| row["model"] == "claude-opus-5-5" && row["variant"] == "max")
+        .unwrap();
+    // Base fallback: (100*1 + 50*2) / 1e6 = 0.0002
+    assert!((neon_low["list_price_estimate"]["amount"].as_f64().unwrap() - 0.0002).abs() < 1e-12);
+    assert_eq!(
+        neon_low["list_price_estimate"]["models"][0]["id"],
+        "gemini-4-neon"
+    );
+    // Hyphen-qualified override wins over base: (100*3 + 50*6) / 1e6 = 0.0006
     assert!(
         (neon_xhigh["list_price_estimate"]["amount"]
             .as_f64()
             .unwrap()
-            - 0.0002)
+            - 0.0006)
             .abs()
             < 1e-12
     );
+    assert_eq!(
+        neon_xhigh["list_price_estimate"]["models"][0]["id"],
+        "gemini-4-neon-xhigh"
+    );
+    // Base fallback: (100*5 + 50*25) / 1e6 = 0.00175
     assert!((opus_high["list_price_estimate"]["amount"].as_f64().unwrap() - 0.00175).abs() < 1e-12);
+    assert_eq!(
+        opus_high["list_price_estimate"]["models"][0]["id"],
+        "claude-opus-5-5"
+    );
+    // Hash-qualified override wins over base: (100*10 + 50*50) / 1e6 = 0.0035
+    assert!((opus_max["list_price_estimate"]["amount"].as_f64().unwrap() - 0.0035).abs() < 1e-12);
+    assert_eq!(
+        opus_max["list_price_estimate"]["models"][0]["id"],
+        "claude-opus-5-5#max"
+    );
 
     let usage_human_out = f.run(&["usage", multi_id, "--harness", "antigravity", "--full"]);
     let usage_human = success(&usage_human_out);
