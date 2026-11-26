@@ -1201,3 +1201,109 @@ per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.5, c
         "{usage_human}"
     );
 }
+
+/// A bare Antigravity model share (`variant: None`) must not consume requests
+/// from an effort-suffixed share of the same base ID when pricing date-sensitive
+/// `tapes-price-table/2` rows.
+#[test]
+fn antigravity_bare_and_variant_shares_price_dated_rows_without_crosstalk() {
+    let Some(f) = Fixture::new() else { return };
+    let dated_id = OTHER;
+    f.database(PROFILE, dated_id, dated_id);
+    let logs = f
+        .profile(PROFILE)
+        .join(format!("brain/{dated_id}/.system_generated/logs"));
+    fs::create_dir_all(&logs).unwrap();
+    fs::write(
+        logs.join("transcript_full.jsonl"),
+        concat!(
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-01-01T10:00:00Z","content":"Run across price boundary."}"#,
+            "\n",
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-01-01T12:00:00Z","model":"review-model","input_tokens":100,"cache_read_tokens":0,"cache_write_tokens":0,"output_tokens":0,"content":"day 1"}"#,
+            "\n",
+            r#"{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-01-02T12:00:00Z","model":"review-model-high","input_tokens":100,"cache_read_tokens":0,"cache_write_tokens":0,"output_tokens":0,"content":"day 2"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let prices_file = f.0.path().join("dated-prices.toml");
+    fs::write(
+        &prices_file,
+        r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "review-model"
+effective = 2026-01-01
+effective_until = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.0, cache_write_5m = 0.0, cache_write_1h = 0.0, output = 0.0 }
+
+[[models]]
+id = "review-model"
+effective = 2026-01-02
+effective_from = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 9.0, cache_read = 0.0, cache_write_5m = 0.0, cache_write_1h = 0.0, output = 0.0 }
+
+[[models]]
+id = "review-model-high"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 3.0, cache_read = 0.0, cache_write_5m = 0.0, cache_write_1h = 0.0, output = 0.0 }
+"#,
+    )
+    .unwrap();
+
+    let usage: Value = serde_json::from_str(success(&f.run(&[
+        "usage",
+        dated_id,
+        "--harness",
+        "antigravity",
+        "--full",
+        "--prices",
+        prices_file.to_str().unwrap(),
+        "--json",
+    ])))
+    .unwrap();
+
+    // 100 * 1.0 / 1e6 (Jan 1 bare) + 100 * 3.0 / 1e6 (Jan 2 high) = 0.0004 USD exact.
+    let estimate = &usage["list_price_estimate"];
+    assert!(
+        estimate["at_least"].is_null() && estimate["at_most"].is_null(),
+        "expected exact amount, got bounds: {estimate:#}"
+    );
+    let amount = estimate["amount"].as_f64().unwrap();
+    assert!(
+        (amount - 0.0004).abs() < 1e-12,
+        "got {amount}: {estimate:#}"
+    );
+    assert!(
+        estimate["measurement_completeness"]["uncached_input"].is_null(),
+        "unexpected uncached_input qualification: {estimate:#}"
+    );
+
+    let by_model = usage["by_model"].as_array().unwrap();
+    assert_eq!(by_model.len(), 2);
+    let bare = by_model
+        .iter()
+        .find(|row| row["model"] == "review-model" && row["variant"].is_null())
+        .unwrap();
+    let high = by_model
+        .iter()
+        .find(|row| row["model"] == "review-model" && row["variant"] == "high")
+        .unwrap();
+    assert!(
+        (bare["list_price_estimate"]["amount"].as_f64().unwrap() - 0.0001).abs() < 1e-12,
+        "{bare:#}"
+    );
+    assert!(
+        bare["list_price_estimate"]["measurement_completeness"]["uncached_input"].is_null(),
+        "{bare:#}"
+    );
+    assert!(
+        (high["list_price_estimate"]["amount"].as_f64().unwrap() - 0.0003).abs() < 1e-12,
+        "{high:#}"
+    );
+}

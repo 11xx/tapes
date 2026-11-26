@@ -479,3 +479,170 @@ fn empty_model_split_under_uncertain_attribution_withholds_sole_model_fallback()
     .estimate(&table);
     assert!(figure.whole.is_none());
 }
+
+/// Claim: a bare model share (`variant: None`) in a non-sole figure matches
+/// only requests with `variant: None`, never consuming effort-variant requests
+/// of the same base ID when pricing dated `/2` rows, while a sole-model figure
+/// without variant-specific rows continues to match all variants of that ID.
+#[test]
+fn bare_model_share_does_not_consume_variant_requests_under_dated_rows() {
+    let table = PriceTable::parse(
+        r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "review-model"
+effective = 2026-01-01
+effective_until = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.0, cache_write_5m = 0.0, output = 0.0 }
+
+[[models]]
+id = "review-model"
+effective = 2026-01-02
+effective_from = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 9.0, cache_read = 0.0, cache_write_5m = 0.0, output = 0.0 }
+
+[[models]]
+id = "review-model-high"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 3.0, cache_read = 0.0, cache_write_5m = 0.0, output = 0.0 }
+"#,
+    )
+    .unwrap();
+    let convention = TokenConvention::of("antigravity").unwrap();
+    let bare_model = Model {
+        id: "review-model".to_owned(),
+        variant: None,
+    };
+    let high_model = Model {
+        id: "review-model".to_owned(),
+        variant: Some("high".to_owned()),
+    };
+    let req_disjoint = DisjointTokens::from_native(&tokens(100, 0, 0), convention, None);
+    let mut requests = RequestUses::default();
+    requests.push(
+        Some(at("2026-01-01T12:00:00Z")),
+        Some(&bare_model),
+        &req_disjoint,
+    );
+    requests.push(
+        Some(at("2026-01-02T12:00:00Z")),
+        Some(&high_model),
+        &req_disjoint,
+    );
+    let terms = RequestTerms {
+        requests: Some(&requests),
+        billing: None,
+        from: Some(at("2026-01-01T12:00:00Z")),
+        to: Some(at("2026-01-02T12:00:00Z")),
+    };
+
+    let bare_share = share("review-model", tokens(100, 0, 0));
+    let mut high_share = share("review-model", tokens(100, 0, 0));
+    high_share.variant = Some("high".to_owned());
+    let shares = [bare_share, high_share];
+    let whole_disjoint = DisjointTokens::from_native(&tokens(200, 0, 0), convention, None);
+    let rec = ModelSelectionRecord {
+        timestamp: None,
+        native_id: None,
+    };
+    let selections = [
+        ModelSelectionSpan {
+            model: bare_model,
+            first: rec.clone(),
+            last: rec.clone(),
+        },
+        ModelSelectionSpan {
+            model: high_model.clone(),
+            first: rec.clone(),
+            last: rec,
+        },
+    ];
+
+    let figure = PricedFigure {
+        disjoint: Some(&whole_disjoint),
+        convention: Some(convention),
+        model: Some(&high_model),
+        selections: &selections,
+        observation: Some(&ModelObservationStatus {
+            mixed: true,
+            head_read: true,
+            attribution_uncertain: false,
+            distinct_observed: Some(2),
+        }),
+        by_model: Some(&shares),
+        terms,
+    }
+    .estimate(&table);
+
+    let bare_est = figure.by_model[0].as_ref().unwrap();
+    assert!((bare_est.amount.unwrap() - 0.0001).abs() < 1e-12);
+    assert!(
+        bare_est.is_complete(),
+        "{:?}",
+        bare_est.measurement_completeness
+    );
+
+    let high_est = figure.by_model[1].as_ref().unwrap();
+    assert!((high_est.amount.unwrap() - 0.0003).abs() < 1e-12);
+    assert!(
+        high_est.is_complete(),
+        "{:?}",
+        high_est.measurement_completeness
+    );
+
+    let whole = figure.whole.and_then(|sum| sum.finish()).unwrap();
+    assert!((whole.amount.unwrap() - 0.0004).abs() < 1e-12);
+    assert!(whole.is_complete(), "{:?}", whole.measurement_completeness);
+
+    // Sole-model figure over a base-only `/2` table continues to match both
+    // bare and variant requests of that base ID.
+    let base_only = PriceTable::parse(
+        r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "review-model"
+effective = 2026-01-01
+effective_until = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.0, cache_write_5m = 0.0, output = 0.0 }
+
+[[models]]
+id = "review-model"
+effective = 2026-01-02
+effective_from = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 9.0, cache_read = 0.0, cache_write_5m = 0.0, output = 0.0 }
+"#,
+    )
+    .unwrap();
+    let sole_figure = PricedFigure {
+        disjoint: Some(&whole_disjoint),
+        convention: Some(convention),
+        model: Some(&high_model),
+        selections: &selections,
+        observation: Some(&ModelObservationStatus {
+            mixed: true,
+            head_read: true,
+            attribution_uncertain: false,
+            distinct_observed: Some(2),
+        }),
+        by_model: None,
+        terms,
+    }
+    .estimate(&base_only);
+    let sole_whole = sole_figure.whole.and_then(|sum| sum.finish()).unwrap();
+    // 100 * 1.0 / 1e6 (Jan 1) + 100 * 9.0 / 1e6 (Jan 2) = 0.0010 USD.
+    assert!((sole_whole.amount.unwrap() - 0.0010).abs() < 1e-12);
+    assert!(
+        sole_whole.is_complete(),
+        "{:?}",
+        sole_whole.measurement_completeness
+    );
+}

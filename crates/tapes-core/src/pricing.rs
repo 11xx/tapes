@@ -1073,9 +1073,9 @@ impl RequestUses {
         self.len() == 0
     }
 
-    /// The counted requests of one model share, by id and, where the share
-    /// names one, variant; `sole` takes too the requests no model was in
-    /// effect for. None when the set is unusable.
+    /// The counted requests of one model share, by id and exact optional
+    /// variant; `sole` takes every variant of `id` as well as requests no
+    /// model was in effect for. None when the set is unusable.
     fn of_share<'a>(
         &'a self,
         id: &'a str,
@@ -1089,11 +1089,7 @@ impl RequestUses {
                         None => sole,
                         Some(position) => {
                             let model = &self.models[usize::from(position)];
-                            model.id == id
-                                && (sole
-                                    || variant.is_none_or(|variant| {
-                                        model.variant.as_deref() == Some(variant)
-                                    }))
+                            model.id == id && (sole || model.variant.as_deref() == variant)
                         }
                     }
             })
