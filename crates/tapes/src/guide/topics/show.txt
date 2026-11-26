@@ -65,7 +65,7 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
-  Claude, Pi and Codex report `session.model_observation`: `mixed` means
+  Antigravity, Claude, Pi and Codex report `session.model_observation`: `mixed` means
   more than one model/effort pair was observed, `distinct_observed` counts
   those pairs, and `attribution_uncertain` marks gaps, partial reads or
   exhausted evidence budgets. `head_read: false` means the selection read
@@ -77,14 +77,14 @@ PROBE BEFORE EXPORTING
   has another span. Endpoints prove the selection at observed records;
   they do not prove it between records. At most the newest 1024 spans and
   32 distinct keys are retained; exhaustion marks attribution uncertain
-  and withholds the count. Claude and Pi endpoints are assistant records;
-  Codex endpoints are turn-context records. Claude and Pi assistant turns
-  carry their own `model` with effort in `variant`; Pi uses the active
-  branch's preceding `thinking_level_change`, leaving effort absent when
-  that setting was not reached. The session model remains the newest
-  selection. Library consumers use `Session::newest_model_selection()` to
-  obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
-  decoding the native records.
+  and withholds the count. Claude and Pi endpoints are assistant records,
+  Antigravity endpoints are `PLANNER_RESPONSE` records, and Codex endpoints are
+  turn-context records. Antigravity, Claude and Pi assistant turns carry their
+  own `model` with effort in `variant`; Pi uses the active branch's preceding
+  `thinking_level_change`, leaving effort absent when that setting was not
+  reached. The session model remains the newest selection. Library consumers
+  use `Session::newest_model_selection()` to obtain a `ModelSelectionSpan` and
+  its `last: ModelSelectionRecord` without decoding the native records.
 
   Claude, Codex, Pi and OpenCode report `locations` beside `turns`: where the
   recording shows the session working, as changes only, in recording order.

@@ -1422,10 +1422,11 @@ enum Command {
         full: bool,
         /// Render the session as JSON. The session may include optional
         /// `live`, `accounting`, and `trailing_record` fields supplied by its
-        /// authorities. Claude, Pi and Codex include `model_observation` and
-        /// ordered `model_selections` with first/last timestamp and native id.
-        /// `head_read: false` marks partial selection coverage. Claude and Pi
-        /// assistant turns carry their record's model and effort (`variant`).
+        /// authorities. Antigravity, Claude, Pi and Codex include
+        /// `model_observation` and ordered `model_selections` with first/last
+        /// timestamp and native id. `head_read: false` marks partial selection
+        /// coverage. Antigravity, Claude and Pi assistant turns carry their
+        /// record's model and effort (`variant`).
         #[arg(long)]
         json: bool,
         #[command(flatten)]

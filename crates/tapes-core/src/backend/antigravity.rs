@@ -19,8 +19,8 @@ use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::measurement::{known_subtotal_notes, MeasurementCompleteness, MeasurementReason};
 use crate::model::{
     AccountingBasis, AccountingCoverage, DisjointTokens, EntryMetadata, KindDeclaration, Model,
-    Role, Session, SourceDescriptor, SourceKind, TokenConvention, Tokens, Transcript, Turn,
-    TurnKind, TurnSelection,
+    ModelObservationStatus, Role, Session, SourceDescriptor, SourceKind, TokenConvention, Tokens,
+    Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::model_observation::Selections;
 use crate::pricing::RequestUses;
@@ -31,6 +31,7 @@ use crate::usage::{ModelUsage, ObservationBasis, UsageAttribution, UsageDetail};
 const HARNESS: &str = "antigravity";
 const MAX_METADATA_BLOB_BYTES: u64 = 65_536;
 const MAX_SEEN_STEPS: usize = 100_000;
+const EFFORT_SUFFIXES: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 const DIRECT_TOKEN_KEYS: [&str; 6] = [
     "input_tokens",
@@ -921,6 +922,20 @@ impl AntigravityUsage {
             ));
         }
 
+        if self.unattributed > 0 || self.conflicting_steps > 0 || self.step_bound_reached {
+            match &mut session.model_observation {
+                Some(status) => status.attribution_uncertain = true,
+                None => {
+                    session.model_observation = Some(ModelObservationStatus {
+                        mixed: false,
+                        head_read: matches!(coverage, AccountingCoverage::Session),
+                        attribution_uncertain: true,
+                        distinct_observed: Some(0),
+                    });
+                }
+            }
+        }
+
         let measurement_incomplete = known_subtotal_notes(&measurement_coverage);
         session.usage_detail = UsageDetail {
             by_model,
@@ -1060,14 +1075,29 @@ fn record_model(record: &Value) -> Option<Model> {
         .flatten()
 }
 
+/// Split a recognized trailing `-<effort>` suffix from an Antigravity model
+/// string when a non-empty base model precedes the hyphen. Antigravity writes
+/// effort onto the model field rather than in a separate attribute.
+fn split_model_effort(raw: &str) -> Model {
+    if let Some((base, suffix)) = raw.rsplit_once('-') {
+        if !base.is_empty() && EFFORT_SUFFIXES.contains(&suffix) {
+            return Model {
+                id: base.to_owned(),
+                variant: Some(suffix.to_owned()),
+            };
+        }
+    }
+    Model {
+        id: raw.to_owned(),
+        variant: None,
+    }
+}
+
 fn record_model_field(record: &Value) -> Option<Model> {
     record["model"]
         .as_str()
         .filter(|id| !id.is_empty())
-        .map(|id| Model {
-            id: id.to_owned(),
-            variant: None,
-        })
+        .map(split_model_effort)
 }
 
 fn read_and_tally(record: &Value, tally: &mut UnmappedTally) -> Vec<Turn> {
@@ -1311,5 +1341,148 @@ mod tests {
         assert_eq!(usage.unattributed, 1);
         assert_eq!(usage.conflicting_steps, 1);
         assert_eq!(usage.unrecognized_usage, 1);
+        let key = ModelKey {
+            model: "gemini-4-neon".to_owned(),
+            variant: Some("xhigh".to_owned()),
+        };
+        assert_eq!(usage.by_model.get(&key).map(|acc| acc.requests), Some(1));
+    }
+
+    #[test]
+    fn model_effort_suffix_splitting_separates_recognized_levels_and_preserves_unsuffixed_ids() {
+        for (raw, expected_id, expected_variant) in [
+            ("gemini-4-neon-low", "gemini-4-neon", Some("low")),
+            ("gemini-4-neon-medium", "gemini-4-neon", Some("medium")),
+            ("claude-opus-5-5-high", "claude-opus-5-5", Some("high")),
+            ("gemini-4-neon-xhigh", "gemini-4-neon", Some("xhigh")),
+            ("claude-opus-5-5-max", "claude-opus-5-5", Some("max")),
+            ("gemini-flash-worker-agy", "gemini-flash-worker-agy", None),
+            (
+                "gemini-pro-orchestrator-neon",
+                "gemini-pro-orchestrator-neon",
+                None,
+            ),
+            ("gemini-3-pro", "gemini-3-pro", None),
+            ("high", "high", None),
+            ("-high", "-high", None),
+            ("low", "low", None),
+            ("-max", "-max", None),
+            ("gemini-4-neon-", "gemini-4-neon-", None),
+            ("gemini-4-neon-HIGH", "gemini-4-neon-HIGH", None),
+        ] {
+            assert_eq!(
+                split_model_effort(raw),
+                Model {
+                    id: expected_id.to_owned(),
+                    variant: expected_variant.map(str::to_owned),
+                },
+                "raw={raw}"
+            );
+        }
+
+        assert_eq!(
+            record_model(&json!({
+                "type": "PLANNER_RESPONSE",
+                "model": "gemini-4-neon-xhigh"
+            })),
+            Some(Model {
+                id: "gemini-4-neon".to_owned(),
+                variant: Some("xhigh".to_owned()),
+            })
+        );
+        assert_eq!(
+            record_model(&json!({
+                "type": "PLANNER_RESPONSE",
+                "model": ""
+            })),
+            None
+        );
+        assert_eq!(
+            record_model(&json!({
+                "type": "CHECKPOINT",
+                "model": "gemini-4-neon-high"
+            })),
+            None
+        );
+        assert_eq!(
+            record_model_field(&json!({
+                "type": "CHECKPOINT",
+                "model": "gemini-4-neon-high"
+            })),
+            Some(Model {
+                id: "gemini-4-neon".to_owned(),
+                variant: Some("high".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn unattributed_checkpoint_marks_model_observation_attribution_uncertain() {
+        let mut usage = AntigravityUsage::default();
+        usage.observe_record(
+            &json!({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-11-25T10:00:00Z",
+                "model": "gemini-4-neon-high",
+                "input_tokens": 100,
+                "cache_read_tokens": 0,
+                "output_tokens": 20
+            }),
+            None,
+        );
+        usage.observe_record(
+            &json!({
+                "step_index": 2,
+                "source": "SYSTEM",
+                "type": "CHECKPOINT",
+                "status": "DONE",
+                "created_at": "2026-11-25T10:00:05Z",
+                "input_tokens": 50,
+                "cache_read_tokens": 100,
+                "output_tokens": 10
+            }),
+            None,
+        );
+
+        let mut session = Session {
+            id: "test-session".to_owned(),
+            source: SourceDescriptor::installed(HARNESS, "/dev/null"),
+            metadata: None,
+            model: Some(Model {
+                id: "gemini-4-neon".to_owned(),
+                variant: Some("high".to_owned()),
+            }),
+            model_observation: Some(ModelObservationStatus {
+                mixed: false,
+                head_read: true,
+                attribution_uncertain: false,
+                distinct_observed: Some(1),
+            }),
+            model_selections: Vec::new(),
+            launch: None,
+            title: None,
+            derived_title: None,
+            derived_title_truncated: None,
+            directory: None,
+            started_at: None,
+            last_activity_at: None,
+            live: None,
+            cost: None,
+            tokens: None,
+            accounting: None,
+            start_uncertain: false,
+            occurrence: None,
+            usage_detail: None,
+            list_price_estimate: None,
+            t3: None,
+        };
+        usage.apply(&mut session, AccountingCoverage::Session, 0);
+        assert!(session
+            .model_observation
+            .as_ref()
+            .is_some_and(|status| status.attribution_uncertain));
     }
 }

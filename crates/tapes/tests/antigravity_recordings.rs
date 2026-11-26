@@ -156,6 +156,17 @@ fn native_identity_recovers_a_pickup_by_id_and_preserves_switch_boundaries() {
     let text = success(&shown);
     let session: Value = serde_json::from_str(text).unwrap();
     assert_eq!(session["session"]["id"], ID);
+    assert_eq!(session["session"]["model"]["id"], "gemini-4-neon");
+    assert_eq!(session["session"]["model"]["variant"], "high");
+    assert_eq!(
+        session["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["role"] == "assistant")
+            .unwrap()["model"],
+        serde_json::json!({"id": "gemini-4-neon", "variant": "high"})
+    );
     for expected in [
         "Check the sample workspace.",
         "The sample printed correctly.",
@@ -238,6 +249,7 @@ fn native_identity_recovers_a_pickup_by_id_and_preserves_switch_boundaries() {
     let antigravity_only = f.run(&["list", "--global"]);
     let listing = success(&antigravity_only);
     assert!(listing.contains(ID));
+    assert!(listing.contains("gemini-4-neon (high)"));
     assert!(listing.contains("Unavailable: claude, codex, opencode, pi"));
     assert!(!listing.contains("No harnesses available."));
 }
@@ -514,7 +526,8 @@ fn antigravity_usage_accounting_directory_scope_spans_pricing_and_self() {
     assert_eq!(usage["disjoint"]["uncached_input"], 361);
     assert_eq!(usage["disjoint"]["cache_read"], 0);
     assert_eq!(usage["disjoint"]["output"], 35);
-    assert_eq!(usage["by_model"][0]["model"], "gemini-3-pro");
+    assert_eq!(usage["by_model"][0]["model"], "gemini-4-neon");
+    assert_eq!(usage["by_model"][0]["variant"], "high");
     assert_eq!(usage["by_model"][0]["request_count"], 2);
     assert_eq!(
         usage["session"]["directory"],
@@ -630,13 +643,7 @@ fn antigravity_usage_accounting_directory_scope_spans_pricing_and_self() {
 currency = "USD"
 
 [[models]]
-id = "gemini-4-neon-high"
-effective = 2026-01-01
-source = "fixture"
-per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.0, cache_write_1h = 1.0, output = 2.0 }
-
-[[models]]
-id = "gemini-4-neon-xhigh"
+id = "gemini-4-neon"
 effective = 2026-01-01
 source = "fixture"
 per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, cache_write_1h = 2.0, output = 4.0 }
@@ -659,23 +666,54 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, ca
     assert_eq!(rich_usage["tokens"]["input"], 1600);
     assert_eq!(rich_usage["tokens"]["cache_read"], 10000);
     assert_eq!(rich_usage["tokens"]["output"], 550);
-    assert_eq!(rich_usage["by_model"].as_array().unwrap().len(), 2);
+    let by_model = rich_usage["by_model"].as_array().unwrap();
+    assert_eq!(by_model.len(), 2);
+    assert_eq!(by_model[0]["model"], "gemini-4-neon");
+    assert_eq!(by_model[0]["variant"], "high");
+    assert_eq!(by_model[1]["model"], "gemini-4-neon");
+    assert_eq!(by_model[1]["variant"], "xhigh");
     assert_eq!(rich_usage["attribution"]["attributed"], 2);
     assert_eq!(rich_usage["attribution"]["unattributed"], 1);
     assert_eq!(
         rich_usage["attribution"]["unattributed_tokens"]["input"],
         100
     );
+    assert_eq!(rich_usage["session"]["model"]["id"], "gemini-4-neon");
+    assert_eq!(rich_usage["session"]["model"]["variant"], "xhigh");
     assert_eq!(rich_usage["session"]["model_observation"]["mixed"], true);
     assert_eq!(
-        rich_usage["session"]["model_selections"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+        rich_usage["session"]["model_observation"]["attribution_uncertain"],
+        true
+    );
+    let selections = rich_usage["session"]["model_selections"]
+        .as_array()
+        .unwrap();
+    assert_eq!(selections.len(), 2);
+    assert_eq!(
+        selections[0]["model"],
+        serde_json::json!({"id": "gemini-4-neon", "variant": "high"})
+    );
+    assert_eq!(
+        selections[1]["model"],
+        serde_json::json!({"id": "gemini-4-neon", "variant": "xhigh"})
     );
     assert!(rich_usage["cost"].is_null());
-    assert!(rich_usage["list_price_estimate"].is_object());
+    // Attributed tokens (1500 in * 2.0 + 5000 cr * 0.2 + 500 out * 4.0) / 1e6 = 0.006 USD;
+    // unattributed CHECKPOINT tokens stay unpriced and qualify incomplete-attribution.
+    let estimate_amount = rich_usage["list_price_estimate"]["amount"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        (estimate_amount - 0.006).abs() < 1e-9,
+        "expected 0.006, got {estimate_amount}"
+    );
+    assert!(
+        rich_usage["list_price_estimate"]["measurement_completeness"]["uncached_input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "incomplete-attribution")
+    );
 
     // Span split selects only step 2 in [10:00:04Z, 10:00:08Z).
     let span_out: Value = serde_json::from_str(success(&f.run(&[
@@ -695,7 +733,18 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, ca
     assert_eq!(span_out["tokens"]["input"], 500);
     assert_eq!(span_out["tokens"]["cache_read"], 3000);
     assert_eq!(span_out["tokens"]["output"], 200);
-    assert!(span_out["list_price_estimate"].is_object());
+    assert_eq!(span_out["by_model"][0]["model"], "gemini-4-neon");
+    assert_eq!(span_out["by_model"][0]["variant"], "xhigh");
+    let span_amount = span_out["list_price_estimate"]["amount"].as_f64().unwrap();
+    assert!(
+        (span_amount - 0.0024).abs() < 1e-9,
+        "expected 0.0024, got {span_amount}"
+    );
+    assert!(
+        span_out["list_price_estimate"]["measurement_completeness"]["uncached_input"].is_null()
+    );
+    assert!(span_out["list_price_estimate"]["measurement_completeness"]["cache_read"].is_null());
+    assert!(span_out["list_price_estimate"]["measurement_completeness"]["output"].is_null());
 
     // 6. Launch-parent marker links child `rich_id` into `ID`'s family.
     let family_out: Value = serde_json::from_str(success(&f.run(&[
@@ -751,4 +800,219 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.0, ca
     assert!(!native_file_refusal.status.success());
     let stderr = String::from_utf8_lossy(&native_file_refusal.stderr);
     assert!(stderr.contains("antigravity"), "{stderr}");
+}
+
+/// Recognized Antigravity trailing effort suffixes split into `Model { id, variant }`
+/// across show, list, usage, pricing, and human output, while unsuffixed models
+/// and degenerate edge cases keep `variant` absent.
+#[test]
+fn antigravity_splits_effort_suffixes_and_preserves_unsuffixed_models() {
+    let Some(f) = Fixture::new() else { return };
+    let multi_id = OTHER;
+    let unsuffixed_id = "a0000000-0000-4000-8000-000000000003";
+    f.database(PROFILE, multi_id, multi_id);
+    f.database(PROFILE, unsuffixed_id, unsuffixed_id);
+
+    let multi_logs = f
+        .profile(PROFILE)
+        .join(format!("brain/{multi_id}/.system_generated/logs"));
+    fs::create_dir_all(&multi_logs).unwrap();
+    let cases = [
+        ("gemini-4-neon-low", "gemini-4-neon", Some("low")),
+        ("gemini-4-neon-medium", "gemini-4-neon", Some("medium")),
+        ("claude-opus-5-5-high", "claude-opus-5-5", Some("high")),
+        ("gemini-4-neon-xhigh", "gemini-4-neon", Some("xhigh")),
+        ("claude-opus-5-5-max", "claude-opus-5-5", Some("max")),
+        ("gemini-flash-worker-agy", "gemini-flash-worker-agy", None),
+        (
+            "gemini-pro-orchestrator-neon",
+            "gemini-pro-orchestrator-neon",
+            None,
+        ),
+        ("high", "high", None),
+        ("-high", "-high", None),
+    ];
+    let mut lines = vec![
+        r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-01-02T10:00:00Z","content":"Exercise effort variants."}"#.to_owned(),
+    ];
+    for (idx, (raw, _, _)) in cases.iter().enumerate() {
+        let step = idx + 1;
+        lines.push(format!(
+            r#"{{"step_index":{step},"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-01-02T10:00:{step:02}Z","model":"{raw}","input_tokens":100,"cache_read_tokens":0,"output_tokens":50,"content":"reply {step}"}}"#
+        ));
+    }
+    fs::write(
+        multi_logs.join("transcript_full.jsonl"),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
+
+    let unsuffixed_logs = f
+        .profile(PROFILE)
+        .join(format!("brain/{unsuffixed_id}/.system_generated/logs"));
+    fs::create_dir_all(&unsuffixed_logs).unwrap();
+    fs::write(
+        unsuffixed_logs.join("transcript_full.jsonl"),
+        concat!(
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-01-02T11:00:00Z","content":"Run worker."}"#,
+            "\n",
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-01-02T11:00:01Z","model":"gemini-flash-worker-agy","input_tokens":1000,"cache_read_tokens":0,"output_tokens":200,"content":"done"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    // Bounded and streamed `show --json` agree on every split and unsuffixed selection.
+    for full in [false, true] {
+        let mut args = vec!["show", multi_id, "--harness", "antigravity", "--json"];
+        if full {
+            args.push("--full");
+        }
+        let shown: Value = serde_json::from_str(success(&f.run(&args))).unwrap();
+        assert_eq!(shown["session"]["model"]["id"], "-high");
+        assert!(shown["session"]["model"]["variant"].is_null());
+        let selections = shown["session"]["model_selections"].as_array().unwrap();
+        assert_eq!(selections.len(), cases.len());
+        for (span, (_, expected_id, expected_variant)) in selections.iter().zip(&cases) {
+            assert_eq!(span["model"]["id"], *expected_id);
+            assert_eq!(span["model"]["variant"].as_str(), *expected_variant);
+        }
+        let assistant_turns: Vec<&Value> = shown["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|turn| turn["role"] == "assistant")
+            .collect();
+        assert_eq!(assistant_turns.len(), cases.len());
+        for (turn, (_, expected_id, expected_variant)) in assistant_turns.iter().zip(&cases) {
+            assert_eq!(turn["model"]["id"], *expected_id);
+            assert_eq!(turn["model"]["variant"].as_str(), *expected_variant);
+        }
+    }
+
+    // `list` renders `id (variant)` for suffixed models and bare `id` for unsuffixed models,
+    // and `--model` matches both forms.
+    let list_out = f.run(&["list", "--global", "--harness", "antigravity"]);
+    let list_human = success(&list_out);
+    assert!(list_human.contains("gemini-4-neon (high)"), "{list_human}");
+    assert!(
+        list_human.contains("gemini-flash-worker-agy"),
+        "{list_human}"
+    );
+    assert!(
+        !list_human.contains("gemini-flash-worker-agy ("),
+        "{list_human}"
+    );
+
+    let filtered_suffixed: Value = serde_json::from_str(success(&f.run(&[
+        "list",
+        "--global",
+        "--harness",
+        "antigravity",
+        "--model",
+        "gemini-4-neon (high)",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(filtered_suffixed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered_suffixed["sessions"][0]["id"], ID);
+
+    let filtered_unsuffixed: Value = serde_json::from_str(success(&f.run(&[
+        "list",
+        "--global",
+        "--harness",
+        "antigravity",
+        "--model",
+        "gemini-flash-worker-agy",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(filtered_unsuffixed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered_unsuffixed["sessions"][0]["id"], unsuffixed_id);
+    assert!(filtered_unsuffixed["sessions"][0]["model"]["variant"].is_null());
+
+    // `usage` separates variants in `by_model`, formats them in human output, and prices by base id.
+    let prices_file = f.0.path().join("multi-prices.toml");
+    fs::write(
+        &prices_file,
+        r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.0, cache_write_1h = 1.0, output = 2.0 }
+
+[[models]]
+id = "claude-opus-5-5"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 5.0, cache_read = 0.5, cache_write_5m = 5.0, cache_write_1h = 5.0, output = 25.0 }
+
+[[models]]
+id = "gemini-flash-worker-agy"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.5, cache_write_1h = 0.5, output = 1.0 }
+"#,
+    )
+    .unwrap();
+
+    let usage_json: Value = serde_json::from_str(success(&f.run(&[
+        "usage",
+        multi_id,
+        "--harness",
+        "antigravity",
+        "--full",
+        "--prices",
+        prices_file.to_str().unwrap(),
+        "--json",
+    ])))
+    .unwrap();
+    let by_model = usage_json["by_model"].as_array().unwrap();
+    assert_eq!(by_model.len(), cases.len());
+    for (_, expected_id, expected_variant) in &cases {
+        let entry = by_model
+            .iter()
+            .find(|row| {
+                row["model"] == *expected_id && row["variant"].as_str() == *expected_variant
+            })
+            .unwrap_or_else(|| {
+                panic!("missing by_model entry ({expected_id:?}, {expected_variant:?}) in {by_model:#?}")
+            });
+        assert_eq!(entry["request_count"], 1);
+    }
+    let neon_xhigh = by_model
+        .iter()
+        .find(|row| row["model"] == "gemini-4-neon" && row["variant"] == "xhigh")
+        .unwrap();
+    let opus_high = by_model
+        .iter()
+        .find(|row| row["model"] == "claude-opus-5-5" && row["variant"] == "high")
+        .unwrap();
+    assert!(
+        (neon_xhigh["list_price_estimate"]["amount"]
+            .as_f64()
+            .unwrap()
+            - 0.0002)
+            .abs()
+            < 1e-12
+    );
+    assert!((opus_high["list_price_estimate"]["amount"].as_f64().unwrap() - 0.00175).abs() < 1e-12);
+
+    let usage_human_out = f.run(&["usage", multi_id, "--harness", "antigravity", "--full"]);
+    let usage_human = success(&usage_human_out);
+    assert!(
+        usage_human.contains("model gemini-4-neon (xhigh):"),
+        "{usage_human}"
+    );
+    assert!(
+        usage_human.contains("model claude-opus-5-5 (high):"),
+        "{usage_human}"
+    );
+    assert!(
+        usage_human.contains("model gemini-flash-worker-agy:"),
+        "{usage_human}"
+    );
 }

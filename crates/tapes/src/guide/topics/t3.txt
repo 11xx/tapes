@@ -51,8 +51,12 @@ ANTIGRAVITY ACP
   profile databases for the same id refuse selection.
 
   The reader keeps visible messages, reasoning, tool calls, generic tool
-  results, model selections and native token usage. The native JSONL supplies
-  no call id for generic results. Recorded step status is kept per turn.
+  results, model selections and native token usage. Recognized trailing effort
+  suffixes (`-low`, `-medium`, `-high`, `-xhigh`, `-max`) on recorded model
+  strings split into `model.id` and `model.variant` when a non-empty base
+  precedes the hyphen; unsuffixed model names leave `variant` absent. The
+  native JSONL supplies no call id for generic results. Recorded step status is
+  kept per turn.
   `PLANNER_RESPONSE` and token-bearing `CHECKPOINT` compaction records sum as
   `summed-requests` under the excludes-cache, includes-reasoning convention;
   `CHECKPOINT` calls without a model name enter unattributed usage rather than
