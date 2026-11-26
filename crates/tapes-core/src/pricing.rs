@@ -2140,7 +2140,11 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
     let by_model = view.by_model.as_deref().or_else(|| {
         view.attribution
             .as_ref()
-            .is_some_and(|attribution| attribution.unattributed > 0)
+            .is_some_and(|attribution| {
+                attribution.counted > 0
+                    && attribution.attributed == 0
+                    && attribution.unattributed > 0
+            })
             .then_some(&[][..])
     });
     let estimate = PricedFigure {

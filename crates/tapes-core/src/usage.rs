@@ -1209,7 +1209,11 @@ impl Session {
         let by_model = models.as_deref().or_else(|| {
             detail
                 .and_then(|detail| detail.attribution.as_ref())
-                .is_some_and(|attribution| attribution.unattributed > 0)
+                .is_some_and(|attribution| {
+                    attribution.counted > 0
+                        && attribution.attributed == 0
+                        && attribution.unattributed > 0
+                })
                 .then_some(&[][..])
         });
         PricedFigure {
